@@ -32,7 +32,7 @@ The KeepEssence server: self-hostable on your own Cloudflare account.
 | `contract/openapi.yaml` | 契约的副本 |
 | `scripts/gen-contract.mjs` | 从契约生成 `src/generated/contract.ts`：路由、参数和请求的校验规则、数字上限、共用规则、MCP 工具清单 |
 | `src/app.ts` | 路由。每条路由都来自生成的契约，一个 `operationId` 对一个处理函数 |
-| `src/handlers/` | 各接口的处理函数 |
+| `src/handlers/` | 各接口的处理函数；`admin.ts` 是管理接口 |
 | `src/services/` | 账户、条目、抓网页、附件、认领与交回（`work.ts`）、每日摘要、通知、Web Push、模型 |
 | `src/builtin.ts` | 两只内置助手。只调用 `services/work.ts` 里外部助手也在用的函数 |
 | `src/mcp.ts` | MCP 端点 |
@@ -40,6 +40,7 @@ The KeepEssence server: self-hostable on your own Cloudflare account.
 | `src/clock.ts` | 唯一的时间来源，测试靠拨它来验过期、21:00、合并通知 |
 | `migrations/` | D1 的表 |
 | `test/` | 自动测试，名字以验收条目开头，例如 `K9 claims: two assistants cannot hold the same item` |
+| `docs/admin-api.md` | 管理接口的定义（不在契约里） |
 | `docs/pitfalls.md` | 踩过的坑 |
 
 契约改了之后：把新的 `openapi.yaml` 拷到 `contract/`，跑 `npm run gen`，再跑测试。生成的文件要提交；有一条测试专门检查它是不是最新的。
@@ -56,7 +57,7 @@ npm run dev                       # 建本地的表，然后在 http://localhost
 
 端口是 **8801**。
 
-没有配发信服务时，登录验证码用管理接口取。管理接口不在契约里，用 `ADMIN_SECRET` 保护；没配 `ADMIN_SECRET` 时这些地址一律 404。
+没有配发信服务时，登录验证码用管理接口取。管理接口不在契约里，用 `ADMIN_SECRET` 保护；没配 `ADMIN_SECRET` 时这些地址一律 404。全部管理接口见 [docs/admin-api.md](docs/admin-api.md)。
 
 ```sh
 B=http://localhost:8801
@@ -78,7 +79,30 @@ curl -X POST $B/v1/items -H "Authorization: Bearer <上一步的 credential>" \
   -d '{"kind":"link","url":"https://example.com/"}'
 ```
 
-其余管理接口：`GET /admin/invites` 列出名单，`DELETE /admin/invites`（请求体同上）移出名单。
+`POST /admin/invites` 也可以一次加一批：`{"emails":["a@example.com","b@example.com"]}`。`GET /admin/invites` 列出名单，`DELETE /admin/invites`（请求体同第 1 步）移出名单。
+
+### 管理接口
+
+给运营者的后台用的接口，都在 `/admin/` 下，定义在 [docs/admin-api.md](docs/admin-api.md)，代码在 `src/handlers/admin.ts`。后台是做什么的见 [spec 的管理后台](https://github.com/KeepEssenceApp/spec/blob/main/product/admin.md)。
+
+| 接口 | 做什么 |
+|---|---|
+| `GET /admin/overview` | 概览：用户、邀请、条目、解读、每日摘要、笔记的数量，等着初筛和解读的条数，内置助手的用量，定时任务上次跑完的时间，模型、发信、通知有没有配好 |
+| `GET` `POST` `DELETE /admin/invites`、`POST /admin/login-codes` | 邀请名单和登录验证码 |
+| `GET /admin/users`、`GET /admin/users/{id}` | 账户列表（可按邮箱查找、按状态筛选）和单个账户的设备、助手、近 30 天数量、各助手用量 |
+| `POST /admin/users/{id}/suspend`、`…/restore` | 停用和恢复 |
+| `POST /admin/users/{id}/sign-out`、`DELETE /admin/users/{id}/devices/{device_id}` | 让全部设备退出、撤销单个设备 |
+| `DELETE /admin/users/{id}` | 删除账户和它的全部数据，请求体要带 `{"confirm_email":"对方的邮箱"}` |
+| `GET /admin/usage` | 内置助手每天的调用次数和 token，用得最多的账户 |
+| `GET` `POST /admin/audit` | 后台动作的记录 |
+
+几条要记住的：
+
+- **不看内容。** 这些接口只返回数量、时间、设备和助手的名称，不返回任何条目、解读、每日摘要、笔记的标题或正文。有一条测试专门往内容里放标记，再查所有管理接口的返回里有没有它。
+- **停用**之后，这个账户的设备和助手的凭据一律 401，不能登录也取不到验证码，内置助手和定时任务跳过它，它的助手认领着的活当场放回。数据原样留着，恢复之后不用重新登录。
+- **删除**不能恢复：数据库里每张带 `user_id` 的表（从表结构里现查，不靠手写的清单）、R2 里 `u/{user_id}/` 下的文件、邀请，一并删掉。
+- 每个动作都记在 `admin_audit` 表里，记录里不放验证码和凭据。
+- 概览里的版本号缺省是 `package.json` 里的版本；想让它显示实际发布的版本，在 `wrangler.toml` 的 `[vars]` 里加 `CORE_VERSION`。
 
 本地不会自动跑定时任务。要手动触发一次：
 
