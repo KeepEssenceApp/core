@@ -522,7 +522,8 @@ export async function submitResults(env: Env, actor: AssistantActor, claimId: st
     ).bind(claim.id, user.id, refs.size),
   );
   await env.DB.batch(statements);
-  return { outcomes };
+  // Outcomes in the order the results were sent.
+  return { outcomes: results.map((r) => outcomes.find((o) => o.ref === refOf(r))!) };
 }
 
 /** The four fixed fields of an analysis, checked beyond what the schema can say. */

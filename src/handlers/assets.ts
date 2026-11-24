@@ -105,13 +105,24 @@ export async function handleUpload(env: Env, request: Request, id: string): Prom
     throw err("unsupported_type", "上传的类型必须和申请时说的一样。", "The upload must have exactly the type that was announced.");
   }
   if (!request.body) throw err("bad_request");
-  // Stream straight into R2. The fixed-length stream fails if the body is shorter or longer than announced.
+  // Stream straight into R2. The fixed-length stream fails if the body is shorter or longer than
+  // announced; the counter in front of it tells "too large" apart from "wrong size".
+  let received = 0;
+  const counter = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      received += chunk.byteLength;
+      if (received > asset.bytes) controller.error(new Error("longer than announced"));
+      else controller.enqueue(chunk);
+    },
+  });
   const fixed = new FixedLengthStream(asset.bytes);
-  const pump = request.body.pipeTo(fixed.writable);
+  const pump = request.body.pipeThrough(counter).pipeTo(fixed.writable);
+  pump.catch(() => {});
   try {
     await Promise.all([env.FILES.put(asset.r2_key, fixed.readable, { httpMetadata: { contentType: asset.content_type } }), pump]);
   } catch {
     await env.FILES.delete(asset.r2_key).catch(() => {});
+    if (received > LIMITS.asset_max_bytes) throw err("too_large");
     throw err("bad_request", "上传的大小和申请时说的不一样。", "The upload does not have the size that was announced.");
   }
   return new Response(null, { status: 204 });

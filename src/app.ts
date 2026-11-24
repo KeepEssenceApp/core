@@ -3,7 +3,7 @@
 import { Hono } from "hono";
 import { CONTRACT } from "./generated/contract";
 import type { ContractOperation } from "./contract-types";
-import type { Env } from "./env";
+import { LIMITS, type Env } from "./env";
 import { ApiError, err, pickLang, type Lang } from "./errors";
 import { handleDownload, handleUpload, completeUpload, getAsset, requestUpload } from "./handlers/assets";
 import { ASSISTANT_HANDLERS } from "./handlers/assistant";
@@ -80,6 +80,14 @@ export const HANDLERS: Record<string, Handler> = {
   // The assistant endpoint authenticates itself (its 401 carries a WWW-Authenticate header).
   assistantEndpoint: async (cx) => handleMcp(cx.env, cx.request!, cx.lang, cx.origin),
   getCalendarImage: async (cx) => settings.calendarImage(cx.env, cx.path.secret.replace(/\.svg$/, ""), new URL(cx.request!.url).searchParams),
+};
+
+/** Checks that answer with a more exact status than the general "bad request" of schema validation. */
+const PRECHECKS: Record<string, (body: Record<string, any>) => void> = {
+  requestUpload(body) {
+    if (typeof body.bytes === "number" && body.bytes > LIMITS.asset_max_bytes) throw err("too_large");
+    if (typeof body.content_type === "string" && !CONTRACT.enums.AssetType.includes(body.content_type)) throw err("unsupported_type");
+  },
 };
 
 /** Routes the core serves that are not operations of the contract. Kept short and listed in one place. */
@@ -177,6 +185,7 @@ async function run(op: ContractOperation, handler: Handler, env: Env, request: R
     }
     // The assistant endpoint reads its own body: JSON-RPC has its own error shape.
     if (op.operationId !== "assistantEndpoint") cx.body = await readBody(op, request);
+    PRECHECKS[op.operationId]?.(cx.body);
     if (op.body && op.operationId !== "assistantEndpoint") assertValid(cx.body, op.body, op.operationId === "submitResult" ? "invalid_result" : "bad_request");
     return respond(await handler(cx));
   } catch (e) {
@@ -203,6 +212,8 @@ export function buildApp(): Hono<{ Bindings: Env }> {
     try {
       return await fn(c.env, c.req.raw, c.req.param("id") ?? "");
     } catch (e) {
+      // Do not leave an unread upload hanging.
+      if (c.req.raw.body && !c.req.raw.body.locked) await c.req.raw.body.cancel().catch(() => {});
       return errorResponse(e, pickLang(c.req.header("accept-language")));
     }
   };

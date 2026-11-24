@@ -49,7 +49,7 @@ export async function call(
   const url = path.startsWith("http") ? path : BASE + path;
   const ctx = createExecutionContext();
   const res = await worker.fetch(new Request(url, { method, headers, body, redirect: "manual" }), env, ctx);
-  const text = await res.text();
+  const text = new TextDecoder().decode(await res.arrayBuffer());
   await waitOnExecutionContext(ctx);
   let json: any = null;
   try {
@@ -170,3 +170,48 @@ export async function db(env: Env, sql: string, ...binds: unknown[]): Promise<an
 }
 
 export { sha256Hex };
+
+import { advance, MINUTE } from "../src/clock";
+import { runMinute } from "../src/cron";
+
+/** Ann with a connected scheduled assistant that is the default for analysis, digest and deep read. */
+export async function withHelper(env: Env, steps = ["analysis", "digest", "deep_read", "deep_dive"]): Promise<{ ann: Session; helper: Connected }> {
+  const ann = await signIn(env);
+  const helper = await connectAssistant(env, ann, { name: "Helper", kind: "scheduled", steps });
+  const roles: Record<string, string> = {};
+  for (const s of steps) roles[s] = helper.assistantId;
+  const r = await call(env, "PATCH", "/v1/settings", { token: ann.token, body: { roles } });
+  if (r.status !== 200) throw new Error("roles failed " + r.text);
+  return { ann, helper };
+}
+
+/** Lets the 10 minutes pass after which the core gives waiting items their defaults. */
+export async function coreTriage(env: Env): Promise<void> {
+  advance(10 * MINUTE + 1000);
+  await runMinute({ ...env, LLM_API_KEY: undefined });
+}
+
+export async function claim(env: Env, token: string, kind: string, limit?: number): Promise<any> {
+  const r = await call(env, "POST", "/v1/assistant/claims", { token, body: { kind, ...(limit ? { limit } : {}) } });
+  if (r.status !== 200) throw new Error("claim failed " + r.text);
+  return r.json;
+}
+
+export function analysis(itemId: string, extra: Record<string, unknown> = {}) {
+  return { kind: "analysis", item_id: itemId, summary: "A short note on brewing tea.", key_fact: "Text, 9 words", points: ["Cooler water for green tea."], verdict: "worth_deep_dive", ...extra };
+}
+
+export async function submit(env: Env, token: string, claimId: string, results: unknown[], usage?: unknown): Promise<Reply> {
+  return call(env, "POST", `/v1/assistant/claims/${claimId}/submit`, { token, body: { results, ...(usage ? { usage } : {}) }, idem: idem() });
+}
+
+/** Saves texts, lets the core triage them, and has the helper analyse them all. Returns the item ids. */
+export async function analysed(env: Env, ann: Session, helper: Connected, texts: string[], extra: Record<string, unknown> = {}): Promise<string[]> {
+  const ids: string[] = [];
+  for (const t of texts) ids.push(await saveText(env, ann.token, t));
+  await coreTriage(env);
+  const c = await claim(env, helper.access, "analysis");
+  const r = await submit(env, helper.access, c.claim_id, c.work.map((w: any) => analysis(w.ref, extra)));
+  if (r.status !== 200 || r.json.outcomes.some((o: any) => !o.accepted)) throw new Error("analysis failed " + r.text);
+  return ids;
+}
