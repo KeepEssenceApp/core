@@ -1,0 +1,60 @@
+# Core (server). See README.md for the deploy guide.
+name = "keepessence-core"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# Custom domain. Uncomment and set your own host once the zone is on your account.
+# routes = [{ pattern = "example.com", custom_domain = true }]
+
+[triggers]
+# Every minute: page fetch fallback, triage, built-in assistants, notifications.
+# Every hour: expiry, cleanup.
+crons = ["* * * * *", "0 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "keepessence-core"
+# PLACEHOLDER: replace with the id printed by `wrangler d1 create keepessence-core`.
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "FILES"
+# PLACEHOLDER: replace with the bucket you created (`wrangler r2 bucket create keepessence-core-files`).
+bucket_name = "keepessence-core-files"
+
+# Optional: the web app Worker. Requests that are not API, OAuth, MCP, admin or calendar-image
+# paths are forwarded to it. Without this binding those requests answer 404.
+# [[services]]
+# binding = "WEB"
+# service = "keepessence-web"
+
+[vars]
+# Where the web app lives (allow page, approve page). Also the browser origin allowed by CORS.
+APP_ORIGIN = "http://localhost:8791"
+# Model endpoint in the Anthropic Messages API format; the key is the secret LLM_API_KEY.
+LLM_BASE_URL = "https://api.anthropic.com"
+LLM_MODEL = "claude-haiku-5-5"
+# Set to "1" only for local development over plain http.
+ALLOW_HTTP = "0"
+# Tunable limits (strings; empty or missing means the default written here).
+TRIAGE_BATCH = "5"                # items per dispatch run, per user
+TRIAGE_USERS_PER_RUN = "3"
+ANALYSIS_BATCH = "2"              # items per worker run, per user
+ANALYSIS_USERS_PER_RUN = "2"
+ANALYSIS_PER_USER_PER_DAY = "200"
+DIGEST_PER_USER_PER_DAY = "1"
+BODY_MAX_CHARS = "100000"         # stored page text
+SAVE_RATE_PER_MINUTE = "120"      # per device
+PUBLIC_RATE_PER_10_MIN = "30"     # per IP hash, per public endpoint
+DELETE_COPIES_ON_USER_DELETE = "true"
+ARCHIVE_RETENTION_DAYS = ""       # empty: keep archived items
+
+# Secrets (set with `wrangler secret put NAME`; never written to files):
+#   LLM_API_KEY        model key. Unset: built-in assistants do nothing; triage defaults still apply.
+#   ADMIN_SECRET       bearer value for /admin/*. Unset: /admin/* answers 404.
+#   SIGNING_KEY        HMAC key for upload and download addresses (any long random string).
+#   VAPID_PRIVATE_KEY  Web Push key pair, from `npm run gen:vapid`.
+#   VAPID_PUBLIC_KEY
+#   RESEND_API_KEY     optional; with EMAIL_FROM, sign-in codes are emailed.
+#   EMAIL_FROM         optional; for example "Sign in <login@example.com>".

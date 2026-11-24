@@ -1,0 +1,171 @@
+import { createExecutionContext, env as baseEnv, waitOnExecutionContext } from "cloudflare:test";
+import worker from "../src/index";
+import type { Env } from "../src/env";
+import { b64url, sha256Hex } from "../src/util";
+
+/** 2026-11-24 12:00 in Asia/Shanghai (04:00 UTC). */
+export const T0 = Date.UTC(2026, 10, 24, 4, 0, 0);
+export const BASE = "https://core.test";
+export const ADMIN = "test-admin-secret";
+export const TZ = "Asia/Shanghai";
+
+export type Outbound = (url: string, init?: RequestInit) => Promise<Response>;
+
+export function makeEnv(extra: Partial<Env> = {}): Env {
+  return { ...(baseEnv as unknown as Env), ...extra };
+}
+
+export interface Reply {
+  status: number;
+  json: any;
+  text: string;
+  headers: Headers;
+}
+
+let keySeq = 0;
+export function idem(): string {
+  return `test-key-${++keySeq}-${Math.random().toString(36).slice(2)}`;
+}
+
+export async function call(
+  env: Env,
+  method: string,
+  path: string,
+  opts: { token?: string | null; body?: unknown; form?: Record<string, string>; headers?: Record<string, string>; raw?: BodyInit; idem?: string | false } = {},
+): Promise<Reply> {
+  const headers: Record<string, string> = { "accept-language": "en", ...(opts.headers ?? {}) };
+  if (opts.token) headers.authorization = `Bearer ${opts.token}`;
+  let body: BodyInit | undefined;
+  if (opts.body !== undefined) {
+    body = JSON.stringify(opts.body);
+    headers["content-type"] = "application/json";
+  } else if (opts.form) {
+    body = new URLSearchParams(opts.form).toString();
+    headers["content-type"] = "application/x-www-form-urlencoded";
+  } else if (opts.raw !== undefined) {
+    body = opts.raw;
+  }
+  if (opts.idem) headers["idempotency-key"] = opts.idem;
+  const url = path.startsWith("http") ? path : BASE + path;
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(new Request(url, { method, headers, body, redirect: "manual" }), env, ctx);
+  const text = await res.text();
+  await waitOnExecutionContext(ctx);
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {}
+  return { status: res.status, json, text, headers: res.headers };
+}
+
+export async function invite(env: Env, email: string): Promise<void> {
+  const r = await call(env, "POST", "/admin/invites", { token: ADMIN, body: { email } });
+  if (r.status !== 201) throw new Error("invite failed " + r.text);
+}
+
+export async function loginCode(env: Env, email: string): Promise<string> {
+  const r = await call(env, "POST", "/admin/login-codes", { token: ADMIN, body: { email } });
+  if (r.status !== 201) throw new Error("login code failed " + r.text);
+  return r.json.code;
+}
+
+export interface Session {
+  token: string;
+  deviceId: string;
+  userId: string;
+  email: string;
+}
+
+export async function signIn(env: Env, email = "ann@example.com", lang: "en" | "zh" = "en"): Promise<Session> {
+  await invite(env, email);
+  const code = await loginCode(env, email);
+  const r = await call(env, "POST", "/v1/auth/sessions", {
+    body: { email, code, device_name: "Test browser", client: "web", timezone: TZ },
+    headers: { "accept-language": lang },
+  });
+  if (r.status !== 201) throw new Error("sign-in failed " + r.text);
+  return { token: r.json.credential, deviceId: r.json.device.id, userId: r.json.user.id, email };
+}
+
+/** Connects another client with a short code, approved by a manage device. */
+export async function connectDevice(env: Env, manager: Session, tier: "save" | "read" | "manage", client = "extension"): Promise<{ token: string; deviceId: string }> {
+  const created = await call(env, "POST", "/v1/device-codes", { body: { device_name: `${tier} device`, client, requested_tier: tier } });
+  const code = created.json.code;
+  const approved = await call(env, "POST", `/v1/device-codes/${code}/approve`, { token: manager.token, body: {} });
+  if (approved.status !== 200) throw new Error("approve failed " + approved.text);
+  const polled = await call(env, "GET", `/v1/device-codes/${code}`, { token: created.json.poll_secret });
+  return { token: polled.json.grant.credential, deviceId: polled.json.grant.device.id };
+}
+
+export interface Connected {
+  access: string;
+  refresh: string;
+  assistantId: string;
+  clientId: string;
+  redirectUri: string;
+}
+
+/** The whole OAuth flow: register, authorize, allow on the allow page, exchange the code. */
+export async function connectAssistant(
+  env: Env,
+  manager: Session,
+  opts: { name: string; kind?: "scheduled" | "chat"; steps?: string[]; scope?: string } = { name: "Helper" },
+): Promise<Connected> {
+  const redirectUri = "https://assistant.example/callback";
+  const reg = await call(env, "POST", "/oauth/register", { body: { client_name: "Test assistant", redirect_uris: [redirectUri] } });
+  const clientId = reg.json.client_id;
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  const q = new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: redirectUri, code_challenge: challenge, code_challenge_method: "S256", state: "s1" });
+  if (opts.scope) q.set("scope", opts.scope);
+  const auth = await call(env, "GET", `/oauth/authorize?${q}`);
+  if (auth.status !== 302) throw new Error("authorize failed " + auth.text);
+  const requestId = new URL(auth.headers.get("location")!).searchParams.get("request")!;
+  const decision = await call(env, "POST", `/v1/oauth/requests/${requestId}/decision`, {
+    token: manager.token,
+    body: { allow: true, name: opts.name, ...(opts.kind ? { kind: opts.kind } : {}), ...(opts.steps ? { steps: opts.steps } : {}) },
+  });
+  if (decision.status !== 200) throw new Error("decision failed " + decision.text);
+  const code = new URL(decision.json.redirect_to).searchParams.get("code")!;
+  const tok = await call(env, "POST", "/oauth/token", { form: { grant_type: "authorization_code", code, code_verifier: verifier, client_id: clientId, redirect_uri: redirectUri } });
+  if (tok.status !== 200) throw new Error("token failed " + tok.text);
+  const list = await call(env, "GET", "/v1/assistants", { token: manager.token });
+  const assistantId = list.json.assistants.find((a: any) => a.name === opts.name).id;
+  return { access: tok.json.access_token, refresh: tok.json.refresh_token, assistantId, clientId, redirectUri };
+}
+
+export async function saveText(env: Env, token: string, text: string, title?: string): Promise<string> {
+  const r = await call(env, "POST", "/v1/items", { token, body: { kind: "text", text, ...(title ? { title } : {}) }, idem: idem() });
+  if (r.status !== 201) throw new Error("save failed " + r.text);
+  return r.json.item_id;
+}
+
+export async function rpc(env: Env, token: string | null, method: string, params?: unknown, id: number | null = 1): Promise<Reply> {
+  return call(env, "POST", "/mcp", { token, body: { jsonrpc: "2.0", ...(id === null ? {} : { id }), method, ...(params === undefined ? {} : { params }) } });
+}
+
+export async function tool(env: Env, token: string, name: string, args: Record<string, unknown> = {}): Promise<{ isError: boolean; data: any; status?: number }> {
+  const r = await rpc(env, token, "tools/call", { name, arguments: args });
+  const result = r.json.result;
+  return { isError: result.isError, data: result.structuredContent, status: result._meta?.status };
+}
+
+/** A stand-in for the model: answers every POST …/v1/messages with what `answer` returns. Never a real model. */
+export function modelStub(answer: (request: any) => unknown, calls: any[] = []): Outbound {
+  return async (url, init) => {
+    if (!url.endsWith("/v1/messages")) return new Response("not stubbed: " + url, { status: 599 });
+    const request = JSON.parse(String(init?.body));
+    calls.push({ url, headers: init?.headers, request });
+    const value = answer(request);
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    return Response.json({ id: "msg_test", type: "message", role: "assistant", model: request.model, stop_reason: "end_turn", content: [{ type: "text", text }], usage: { input_tokens: 120, output_tokens: 40 } });
+  };
+}
+
+export const LLM = { LLM_API_KEY: "test-model-key", LLM_BASE_URL: "https://model.test" };
+
+export async function db(env: Env, sql: string, ...binds: unknown[]): Promise<any[]> {
+  return (await env.DB.prepare(sql).bind(...binds).all()).results;
+}
+
+export { sha256Hex };

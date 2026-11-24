@@ -1,0 +1,231 @@
+// The router. Every route comes from the generated contract: the path, who may call it
+// (tier or assistant), its parameters and its body schema. A handler exists per operationId.
+import { Hono } from "hono";
+import { CONTRACT } from "./generated/contract";
+import type { ContractOperation } from "./contract-types";
+import type { Env } from "./env";
+import { ApiError, err, pickLang, type Lang } from "./errors";
+import { handleDownload, handleUpload, completeUpload, getAsset, requestUpload } from "./handlers/assets";
+import { ASSISTANT_HANDLERS } from "./handlers/assistant";
+import * as devices from "./handlers/devices";
+import * as items from "./handlers/items";
+import * as oauth from "./handlers/oauth";
+import * as reading from "./handlers/reading";
+import * as settings from "./handlers/settings";
+import { adminInvites, adminLoginCode, getMeta, requestLoginCode, signIn } from "./handlers/signin";
+import { handleMcp } from "./mcp";
+import { authAssistant, authDevice, bearerOf, tierAllows } from "./services/accounts";
+import type { Cx, Handler, Result } from "./types";
+import { assertValid, coerce } from "./validate";
+
+export const HANDLERS: Record<string, Handler> = {
+  getMeta,
+  requestLoginCode,
+  signIn,
+  createDeviceCode: devices.createDeviceCode,
+  pollDeviceCode: devices.pollDeviceCode,
+  getDeviceCodeRequest: devices.getDeviceCodeRequest,
+  approveDeviceCode: devices.approveDeviceCode,
+  denyDeviceCode: devices.denyDeviceCode,
+  listDevices: devices.listDevices,
+  getThisDevice: devices.getThisDevice,
+  signOutThisDevice: devices.signOutThisDevice,
+  registerPush: devices.registerPush,
+  unregisterPush: devices.unregisterPush,
+  updateDevice: devices.updateDevice,
+  revokeDevice: devices.revokeDevice,
+  getPushKey: devices.getPushKey,
+  saveItem: items.saveItem,
+  listItems: items.listItems,
+  searchItems: items.searchItems,
+  getItem: items.getItem,
+  updateItem: items.updateItem,
+  deleteItem: items.deleteItem,
+  pinItem: items.pinItem,
+  unpinItem: items.unpinItem,
+  setSignal: items.setSignal,
+  clearSignal: items.clearSignal,
+  listDigests: reading.listDigests,
+  getDigest: reading.getDigest,
+  markDigestRead: reading.markDigestRead,
+  listQueue: reading.listQueue,
+  addToQueue: reading.addToQueue,
+  removeFromQueue: reading.removeFromQueue,
+  startDeepDive: reading.startDeepDive,
+  listNotes: reading.listNotes,
+  pasteNote: reading.pasteNote,
+  getNote: reading.getNote,
+  requestUpload,
+  completeUpload,
+  getAsset,
+  getStatus: reading.getStatus,
+  getCalendar: reading.getCalendar,
+  getStats: reading.getStats,
+  getUsage: reading.getUsage,
+  getSettings: settings.getSettings,
+  updateSettings: settings.updateSettings,
+  rotateCalendarImage: settings.rotateCalendarImage,
+  listAssistants: settings.listAssistantsHandler,
+  updateAssistant: settings.updateAssistant,
+  revokeAssistant: settings.revokeAssistantHandler,
+  getAuthorizationRequest: oauth.getAuthorizationRequest,
+  decideAuthorizationRequest: oauth.decideAuthorizationRequest,
+  ...ASSISTANT_HANDLERS,
+  getAuthorizationServerMetadata: oauth.getAuthorizationServerMetadata,
+  getProtectedResourceMetadata: oauth.getProtectedResourceMetadata,
+  registerClient: oauth.registerClient,
+  authorize: oauth.authorize,
+  token: oauth.token,
+  revoke: oauth.revoke,
+  // The assistant endpoint authenticates itself (its 401 carries a WWW-Authenticate header).
+  assistantEndpoint: async (cx) => handleMcp(cx.env, cx.request!, cx.lang, cx.origin),
+  getCalendarImage: async (cx) => settings.calendarImage(cx.env, cx.path.secret.replace(/\.svg$/, ""), new URL(cx.request!.url).searchParams),
+};
+
+/** Routes the core serves that are not operations of the contract. Kept short and listed in one place. */
+export const EXTRA_ROUTES: { method: string; path: string; why: string }[] = [
+  { method: "PUT", path: "/v1/uploads/{id}", why: "the signed upload address that POST /v1/assets hands out" },
+  { method: "GET", path: "/v1/downloads/{id}", why: "the signed download address that GET /v1/assets/{id} hands out" },
+  { method: "POST", path: "/admin/invites", why: "operator: invite an email address" },
+  { method: "GET", path: "/admin/invites", why: "operator: list invited addresses" },
+  { method: "DELETE", path: "/admin/invites", why: "operator: remove an invitation" },
+  { method: "POST", path: "/admin/login-codes", why: "operator: mint a sign-in code to pass on" },
+];
+
+/** `/v1/items/{id}` → `/v1/items/:id`; `/c/{secret}.svg` → `/c/:secret{[^/]+\\.svg}`. */
+export function honoPath(path: string): string {
+  return path.replace(/\{(\w+)\}\.svg/g, ":$1{[^/]+\\.svg}").replace(/\{(\w+)\}/g, ":$1");
+}
+
+function respond(result: Result | Response): Response {
+  if (result instanceof Response) return result;
+  if (result.body === undefined) return new Response(null, { status: result.status, headers: result.headers });
+  return Response.json(result.body, { status: result.status, headers: result.headers });
+}
+
+export function errorResponse(e: unknown, lang: Lang): Response {
+  if (e instanceof ApiError) return Response.json(e.body(lang), { status: e.status, headers: e.headers });
+  console.error("unhandled", e);
+  return Response.json(err("server_error").body(lang), { status: 500 });
+}
+
+async function readBody(op: ContractOperation, request: Request): Promise<Record<string, any>> {
+  if (!op.bodyType) return {};
+  const text = await request.text();
+  if (!text.trim()) {
+    if (op.bodyRequired) throw err("bad_request", "缺少请求内容。", "The request body is missing.");
+    return {};
+  }
+  if (op.bodyType === "application/x-www-form-urlencoded") return Object.fromEntries(new URLSearchParams(text));
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw err("bad_request", "请求内容不是合法的 JSON。", "The request body is not valid JSON.");
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) throw err("bad_request", "请求内容应为 JSON 对象。", "The request body must be a JSON object.");
+  return body as Record<string, any>;
+}
+
+async function run(op: ContractOperation, handler: Handler, env: Env, request: Request, pathParams: Record<string, string>, exec?: ExecutionContext): Promise<Response> {
+  const url = new URL(request.url);
+  const header = request.headers.get("accept-language");
+  let lang = pickLang(header);
+  try {
+    const cx: Cx = {
+      env,
+      op,
+      lang,
+      origin: env.PUBLIC_ORIGIN || url.origin,
+      exec,
+      request,
+      bearer: bearerOf(request),
+      path: {},
+      query: {},
+      body: {},
+    };
+    // Who is calling, and may they.
+    if (op.auth === "device") {
+      const { device, user } = await authDevice(env, cx.bearer ?? null);
+      cx.device = device;
+      cx.user = user;
+      if (!header) cx.lang = lang = user.lang;
+      if (!tierAllows(device.tier, op.tier ?? "manage")) throw err("forbidden");
+    } else if (op.auth === "assistant" && op.operationId !== "assistantEndpoint") {
+      cx.assistant = await authAssistant(env, cx.bearer ?? null);
+    }
+    // Parameters, checked against the contract.
+    for (const p of op.params) {
+      if (p.in === "path") {
+        const value = decodeURIComponent(pathParams[p.name] ?? "");
+        assertValid(value, p.schema, "bad_request", p.name);
+        cx.path[p.name] = value;
+      } else if (p.in === "query") {
+        const raw = url.searchParams.get(p.name);
+        if (raw === null) {
+          if (p.required) throw err("bad_request", `缺少参数 ${p.name}。`, `The parameter ${p.name} is missing.`);
+          if (p.schema.default !== undefined) cx.query[p.name] = p.schema.default;
+          continue;
+        }
+        const value = coerce(raw, p.schema);
+        assertValid(value, p.schema, "bad_request", p.name);
+        cx.query[p.name] = value;
+      } else if (p.name === "Idempotency-Key") {
+        cx.idemKey = request.headers.get("idempotency-key") ?? undefined;
+        if (!cx.idemKey) throw err("idempotency_key_required");
+      }
+    }
+    cx.body = await readBody(op, request);
+    if (op.body) assertValid(cx.body, op.body, op.operationId === "submitResult" ? "invalid_result" : "bad_request");
+    return respond(await handler(cx));
+  } catch (e) {
+    return errorResponse(e, lang);
+  }
+}
+
+export function buildApp(): Hono<{ Bindings: Env }> {
+  const app = new Hono<{ Bindings: Env }>();
+  for (const op of CONTRACT.operations) {
+    const handler = HANDLERS[op.operationId];
+    if (!handler) continue; // the route test fails loudly when a handler is missing
+    app.on(op.method, honoPath(op.path), (c) => {
+      let exec: ExecutionContext | undefined;
+      try {
+        exec = c.executionCtx as ExecutionContext;
+      } catch {
+        exec = undefined;
+      }
+      return run(op, handler, c.env, c.req.raw, c.req.param() as Record<string, string>, exec);
+    });
+  }
+  const guarded = (fn: (env: Env, request: Request, id: string) => Promise<Response>) => async (c: any) => {
+    try {
+      return await fn(c.env, c.req.raw, c.req.param("id") ?? "");
+    } catch (e) {
+      return errorResponse(e, pickLang(c.req.header("accept-language")));
+    }
+  };
+  app.put("/v1/uploads/:id", guarded(handleUpload));
+  app.get("/v1/downloads/:id", guarded(handleDownload));
+  app.post("/admin/invites", guarded((env, req) => adminInvites(env, req)));
+  app.get("/admin/invites", guarded((env, req) => adminInvites(env, req)));
+  app.delete("/admin/invites", guarded((env, req) => adminInvites(env, req)));
+  app.post("/admin/login-codes", guarded((env, req) => adminLoginCode(env, req)));
+
+  const known = CONTRACT.operations.map((op) => ({ method: op.method, match: new RegExp("^" + op.path.replace(/\{\w+\}/g, "[^/]+").replace(/\./g, "\\.") + "$") }));
+  app.notFound((c) => {
+    const lang = pickLang(c.req.header("accept-language"));
+    const path = new URL(c.req.url).pathname;
+    const allowed = known.filter((k) => k.match.test(path)).map((k) => k.method);
+    if (allowed.length > 0) {
+      // The path exists, the method does not (for example GET on the assistant endpoint).
+      return Response.json(err("bad_request", "这个地址不支持这种请求方法。", "This address does not support this method.").body(lang), {
+        status: 405,
+        headers: { allow: [...new Set(allowed)].join(", ") },
+      });
+    }
+    return Response.json(err("not_found").body(lang), { status: 404 });
+  });
+  app.onError((e, c) => errorResponse(e, pickLang(c.req.header("accept-language"))));
+  return app;
+}
