@@ -85,7 +85,10 @@ export async function sendDueNotifications(env: Env): Promise<number> {
     const user = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(batch.user_id).first<UserRow>();
     if (!user || !user.notify) continue;
     const note = await composeNotification(env, user, parseJson(batch.events, []));
-    if (!note) continue;
+    if (!note) {
+      console.log("notify: nothing left to say for this batch (already handled, or gone)");
+      continue;
+    }
     const targets = await env.DB.prepare(
       `SELECT p.device_id, p.endpoint, p.p256dh, p.auth FROM push_targets p
        JOIN devices d ON d.id = p.device_id AND d.user_id = p.user_id
@@ -100,7 +103,9 @@ export async function sendDueNotifications(env: Env): Promise<number> {
         await env.DB.prepare("DELETE FROM push_targets WHERE device_id = ? AND user_id = ?").bind(target.device_id, user.id).run();
       }
       if (outcome === "sent") sent++;
+      console.log(`notify: ${note.kind} x${note.count} to one device: ${outcome}`);
     }
+    if (targets.results.length === 0) console.log("notify: no device of this user receives notifications");
   }
   return sent;
 }

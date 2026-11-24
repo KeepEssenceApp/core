@@ -3,7 +3,7 @@
 KeepEssence 的核心（服务器）。部署在 Cloudflare 上，你可以用自己的账号部署一套。
 The KeepEssence server: self-hostable on your own Cloudflare account.
 
-状态：第一批代码已写完，本地自动测试全过（见下面「测试」）。还没有部署到线上，线上和真机的验收没做。
+状态：1.x，内测中，部署在 keepessence.app。本地自动测试全过（见下面「测试」）；线上验过登录、存入、内置助手的初筛和解读、每日摘要、短码接入、助手经 MCP 接入。验收标准和逐条结果见 [spec 的验收标准](https://github.com/KeepEssenceApp/spec/blob/main/product/acceptance.md)。
 
 ## 它做什么
 

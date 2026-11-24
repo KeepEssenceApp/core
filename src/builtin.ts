@@ -9,7 +9,7 @@ import { callModel, extractJson, modelConfigured, type ContentBlock } from "./se
 import { digestDue } from "./services/digests";
 import { capLeft, claimWork, getContext, getDigestContext, getRules, releaseClaim, submitResults, type UsageInput } from "./services/work";
 import type { AssistantActor, UserRow } from "./types";
-import { truncate } from "./util";
+import { shorten, truncate } from "./util";
 
 const LANG_NAME: Record<Lang, string> = { zh: "简体中文", en: "English" };
 const VERDICTS = ["worth_deep_dive", "good_to_know", "skippable"];
@@ -19,7 +19,7 @@ async function seen(env: Env, actor: AssistantActor): Promise<void> {
 }
 
 function str(value: unknown, max: number): string | undefined {
-  return typeof value === "string" && value.trim() ? truncate(value.replace(/\s+/g, " ").trim(), max) : undefined;
+  return typeof value === "string" && value.trim() ? shorten(value.replace(/\s+/g, " ").trim(), max) : undefined;
 }
 
 // ---------------------------------------------------------------- dispatch assistant (step: triage)

@@ -84,10 +84,21 @@ export async function sendPush(
       },
       body,
     });
-    await response.body?.cancel().catch(() => {});
-    if (response.status === 404 || response.status === 410) return "gone";
-    return response.ok ? "sent" : "failed";
-  } catch {
+    if (response.status === 404 || response.status === 410) {
+      await response.body?.cancel().catch(() => {});
+      return "gone";
+    }
+    if (response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return "sent";
+    }
+    // Say why in the log (the push service's own words, never the message): a refused push is
+    // otherwise invisible.
+    const reason = (await response.text().catch(() => "")).slice(0, 300);
+    console.warn(`push refused: ${response.status} by ${new URL(target.endpoint).host}: ${reason}`);
+    return "failed";
+  } catch (e) {
+    console.warn("push failed before it was answered", e instanceof Error ? e.message : e);
     return "failed";
   }
 }

@@ -77,6 +77,22 @@ export function truncate(text: string, max: number): string {
   return chars.length <= max ? text : chars.slice(0, max).join("");
 }
 
+/** Shortens to at most `max` characters without stopping in the middle of a word or a clause:
+    cuts back to the last space or punctuation mark when one is near, and ends with an ellipsis. */
+export function shorten(text: string, max: number): string {
+  const chars = [...text];
+  if (chars.length <= max) return text;
+  const head = chars.slice(0, max - 1);
+  let cut = head.length;
+  for (let i = head.length - 1; i >= Math.floor(head.length * 0.6); i--) {
+    if (/[\s,;:，；：、。.!?！？]/.test(head[i])) {
+      cut = i;
+      break;
+    }
+  }
+  return head.slice(0, cut).join("").replace(/[\s,;:，；：、]+$/, "") + "…";
+}
+
 export function encodeCursor(offset: number): string {
   return b64url(enc.encode(String(offset)));
 }
