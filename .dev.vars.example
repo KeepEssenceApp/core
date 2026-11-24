@@ -1,0 +1,9 @@
+# Copy to .dev.vars (git-ignored) for local development. Never commit real values.
+ALLOW_HTTP=1
+ADMIN_SECRET=change-me-local-admin
+SIGNING_KEY=change-me-local-signing-key
+# Optional: without LLM_API_KEY the built-in assistants do nothing.
+# LLM_API_KEY=
+# Optional: from `npm run gen:vapid`.
+# VAPID_PUBLIC_KEY=
+# VAPID_PRIVATE_KEY=

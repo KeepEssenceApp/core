@@ -53,7 +53,7 @@ export function isPublicUrl(raw: string): boolean {
   if (ipv4Private(host)) return false;
   if (/^\d+$/.test(host) || /^0x/i.test(host)) return false;
   if (host === "localhost" || !host.includes(".")) return false;
-  if (/\.(localhost|local|internal|lan|home|corp|intranet|test|invalid|example|onion)$/.test(host)) return false;
+  if (/\.(localhost|local|internal|lan|home|corp|intranet|onion)$/.test(host)) return false;
   return true;
 }
 

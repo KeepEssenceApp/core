@@ -39,9 +39,9 @@ LLM_MODEL = "claude-haiku-5-5"
 ALLOW_HTTP = "0"
 # Tunable limits (strings; empty or missing means the default written here).
 TRIAGE_BATCH = "5"                # items per dispatch run, per user
-TRIAGE_USERS_PER_RUN = "3"
-ANALYSIS_BATCH = "2"              # items per worker run, per user
-ANALYSIS_USERS_PER_RUN = "2"
+TRIAGE_USERS_PER_RUN = "2"
+ANALYSIS_BATCH = "3"              # items per worker run, per user
+ANALYSIS_USERS_PER_RUN = "1"
 ANALYSIS_PER_USER_PER_DAY = "200"
 DIGEST_PER_USER_PER_DAY = "1"
 BODY_MAX_CHARS = "100000"         # stored page text
