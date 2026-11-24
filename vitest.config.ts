@@ -6,13 +6,17 @@ export default defineConfig(async () => {
   return {
     plugins: [
       cloudflareTest({
-        wrangler: { configPath: "./wrangler.toml" },
+        wrangler: { configPath: "./wrangler.test.toml" },
         miniflare: {
           bindings: {
             TEST_MIGRATIONS: migrations,
             ADMIN_SECRET: "test-admin-secret",
             SIGNING_KEY: "test-signing-key",
             APP_ORIGIN: "https://app.test",
+            // Never a real model or mail provider in tests, whatever .dev.vars holds.
+            LLM_API_KEY: "",
+            LLM_BASE_URL: "https://model.test",
+            RESEND_API_KEY: "",
           },
         },
       }),

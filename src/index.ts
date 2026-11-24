@@ -60,6 +60,12 @@ export async function handle(request: Request, env: Env, ctx: ExecutionContext):
     return Response.json(err("bad_request", "只接受 HTTPS。", "HTTPS only.").body(lang), { status: 400 });
   }
   if (!isCorePath(url.pathname)) {
+    // A share from the phone's share sheet normally stops in the web app's service worker.
+    // When that worker is not active yet the POST arrives here; send the browser to the page,
+    // which says the share could not be read, instead of answering an error.
+    if (request.method === "POST" && new URL(request.url).pathname === "/share") {
+      return new Response(null, { status: 303, headers: { location: "/share" } });
+    }
     if (env.WEB) return env.WEB.fetch(request);
     return Response.json(err("not_found").body(lang), { status: 404 });
   }

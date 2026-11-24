@@ -72,7 +72,11 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
     return {
       text,
       model: typeof data.model === "string" ? data.model : model,
-      inputTokens: Number(data.usage?.input_tokens) || 0,
+      // Gateways that cache prompts report the cached part separately; count all of it as input.
+      inputTokens:
+        (Number(data.usage?.input_tokens) || 0) +
+        (Number(data.usage?.cache_creation_input_tokens) || 0) +
+        (Number(data.usage?.cache_read_input_tokens) || 0),
       outputTokens: Number(data.usage?.output_tokens) || 0,
     };
   } catch {

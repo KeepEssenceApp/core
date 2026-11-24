@@ -7,3 +7,5 @@ SIGNING_KEY=change-me-local-signing-key
 # Optional: from `npm run gen:vapid`.
 # VAPID_PUBLIC_KEY=
 # VAPID_PRIVATE_KEY=
+# Local address of the web app and the core.
+APP_ORIGIN=http://localhost:8801
