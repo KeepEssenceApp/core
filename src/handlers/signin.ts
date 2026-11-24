@@ -68,7 +68,9 @@ async function mailCode(env: Env, email: string, code: string, lang: Lang): Prom
   if (!mailConfigured(env)) return; // no mail provider: the operator hands the code out
   const { subject, text } = MAIL_TEXT[lang](code, LIMITS.login_code_minutes);
   try {
-    if (env.EMAIL) {
+    // A Resend key, when set, comes first: the platform's own binding reaches only verified
+    // addresses unless the sending domain is onboarded on a paid plan.
+    if (env.EMAIL && !env.RESEND_API_KEY) {
       await env.EMAIL.send({ to: email, from: env.EMAIL_FROM!, subject, text });
       await noteMail(env, "sent");
       return;
@@ -79,7 +81,8 @@ async function mailCode(env: Env, email: string, code: string, lang: Lang): Prom
       body: JSON.stringify({ from: env.EMAIL_FROM, to: [email], subject, text }),
     });
     if (!response.ok) console.warn(`sign-in mail refused: ${response.status}`);
-    await noteMail(env, response.ok ? "sent" : `refused: ${response.status}`);
+    const refusal = response.ok ? "" : (await response.clone().text().catch(() => "")).slice(0, 120);
+    await noteMail(env, response.ok ? "sent" : `refused: ${response.status} ${refusal}`);
     await response.body?.cancel().catch(() => {});
   } catch (e) {
     // The answer is 202 either way; the user can ask again. Say why in the log, never the code or the address.
