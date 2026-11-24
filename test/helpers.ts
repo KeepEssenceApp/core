@@ -215,3 +215,39 @@ export async function analysed(env: Env, ann: Session, helper: Connected, texts:
   if (r.status !== 200 || r.json.outcomes.some((o: any) => !o.accepted)) throw new Error("analysis failed " + r.text);
   return ids;
 }
+
+/** A model stand-in that answers the three built-in jobs by their system prompt. */
+export function builtinModel(calls: any[] = [], overrides: { triage?: (input: any) => unknown; analysis?: (input: any) => unknown; digest?: (input: any) => unknown } = {}): Outbound {
+  return modelStub((req) => {
+    const content = req.messages[0].content;
+    const input = JSON.parse(typeof content === "string" ? content : content.find((b: any) => b.type === "text").text);
+    if (req.system.startsWith("You sort")) return overrides.triage ? overrides.triage(input) : input.items.map((i: any) => ({ item_id: i.item_id }));
+    if (req.system.startsWith("You analyse")) {
+      return overrides.analysis
+        ? overrides.analysis(input)
+        : { summary: `About: ${input.title}`.slice(0, 60), key_fact: "Text, short", points: ["First point.", "Second point."], verdict: "worth_deep_dive" };
+    }
+    return overrides.digest
+      ? overrides.digest(input)
+      : { summary: `You saved ${input.analyses.length} things today.`, worth: input.analyses.filter((a: any) => a.verdict === "worth_deep_dive").map((a: any) => ({ item_id: a.item_id, line: `Worth it: ${a.title}`.slice(0, 160) })), question: "What would you brew tomorrow?" };
+  }, calls);
+}
+
+export const HOUR_MS = 60 * 60 * 1000;
+
+/** The assistant renews its own credentials (they last an hour); no user involved. */
+export async function refresh(env: Env, helper: Connected): Promise<void> {
+  const r = await call(env, "POST", "/oauth/token", { form: { grant_type: "refresh_token", refresh_token: helper.refresh, client_id: helper.clientId } });
+  if (r.status !== 200) throw new Error("refresh failed " + r.text);
+  helper.access = r.json.access_token;
+  helper.refresh = r.json.refresh_token;
+}
+
+/** Moves the clock far ahead while the device stays in use (a device idle for 90 days stops working). */
+export async function leap(env: Env, session: Session, ms: number): Promise<void> {
+  const step = 60 * 24 * HOUR_MS;
+  for (let left = ms; left > 0; left -= step) {
+    advance(Math.min(step, left));
+    await call(env, "GET", "/v1/devices/me", { token: session.token });
+  }
+}
