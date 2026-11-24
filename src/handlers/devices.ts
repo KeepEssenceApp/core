@@ -11,6 +11,7 @@ import {
   deviceIsLive,
   deviceView,
   getUser,
+  isSuspended,
   listAssistants,
   revokeAssistant,
   tierRank,
@@ -73,6 +74,8 @@ export const pollDeviceCode: Handler = async (cx) => {
     if (row.expires_at <= now()) throw err("gone");
     return ok({ status: "pending" });
   }
+  // A suspended account hands out nothing; the code is not used up.
+  if (row.user_id && (await isSuspended(cx.env, row.user_id))) throw err("unauthorized");
   // Approved: mint the credential now, so it is never stored in the clear, and hand it over once.
   const credential = "kd_" + randomToken(32);
   const taken = await cx.env.DB.prepare("UPDATE device_codes SET status = 'used' WHERE code_hash = ? AND status = 'approved'").bind(row.code_hash).run();

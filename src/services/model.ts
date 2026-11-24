@@ -22,6 +22,8 @@ export interface ModelRequest {
   timeoutMs: number;
 }
 
+export const DEFAULT_MODEL = "claude-haiku-5-5";
+
 export function modelConfigured(env: Env): boolean {
   return Boolean(env.LLM_API_KEY);
 }
@@ -29,7 +31,7 @@ export function modelConfigured(env: Env): boolean {
 export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply | null> {
   if (!env.LLM_API_KEY) return null;
   const base = (env.LLM_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
-  const model = env.LLM_MODEL || "claude-haiku-5-5";
+  const model = env.LLM_MODEL || DEFAULT_MODEL;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), req.timeoutMs);
   const send = (extra: Record<string, unknown>) =>

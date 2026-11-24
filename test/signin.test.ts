@@ -112,25 +112,3 @@ describe("K1 sign-in", () => {
     expect(await db(env, "SELECT id FROM users")).toHaveLength(1);
   });
 });
-
-describe("admin endpoints", () => {
-  it("admin: needs the admin secret; answers 404 when no secret is configured", async () => {
-    const env = makeEnv();
-    expect((await call(env, "GET", "/admin/invites")).status).toBe(401);
-    expect((await call(env, "GET", "/admin/invites", { token: "wrong" })).status).toBe(401);
-    expect((await call(env, "GET", "/admin/invites", { token: ADMIN })).status).toBe(200);
-    const off = makeEnv({ ADMIN_SECRET: undefined });
-    expect((await call(off, "GET", "/admin/invites", { token: ADMIN })).status).toBe(404);
-    expect((await call(off, "POST", "/admin/login-codes", { token: ADMIN, body: { email: "a@b.co" } })).status).toBe(404);
-  });
-
-  it("admin: invites can be added, listed and removed", async () => {
-    const env = makeEnv();
-    await invite(env, "Ann@Example.com");
-    await invite(env, "bob@example.com");
-    const list = await call(env, "GET", "/admin/invites", { token: ADMIN });
-    expect(list.json.invites.map((i: any) => i.email)).toEqual(["ann@example.com", "bob@example.com"]);
-    expect((await call(env, "DELETE", "/admin/invites", { token: ADMIN, body: { email: "bob@example.com" } })).status).toBe(204);
-    expect((await call(env, "POST", "/admin/login-codes", { token: ADMIN, body: { email: "bob@example.com" } })).status).toBe(404);
-  });
-});

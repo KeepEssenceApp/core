@@ -8,7 +8,7 @@ import { num, outbound, type Env } from "../env";
 import { err } from "../errors";
 import { ok, type AssistantRow, type Cx, type Handler, type Result, type Step } from "../types";
 import { b64url, newId, parseJson, randomToken, sha256Hex } from "../util";
-import { dropAssistantCredentials } from "../services/accounts";
+import { dropAssistantCredentials, isSuspended } from "../services/accounts";
 import { isPublicUrl } from "../services/fetchpage";
 import { ipKey, rateLimit } from "../services/guard";
 
@@ -247,6 +247,16 @@ async function issue(env: Env, userId: string, assistant: AssistantRow, clientId
   };
 }
 
+/**
+ * A suspended account gets no credentials. The answer is 401 and nothing is used up: the code or
+ * the refresh credential still works once the operator restores the account.
+ */
+const SUSPENDED: Result = {
+  status: 401,
+  body: { error: "access_denied", error_description: "the account is suspended" },
+  headers: { "cache-control": "no-store" },
+};
+
 async function liveAssistant(env: Env, userId: string, assistantId: string): Promise<AssistantRow | null> {
   return env.DB.prepare("SELECT * FROM assistants WHERE id = ? AND user_id = ? AND revoked_at IS NULL").bind(assistantId, userId).first<AssistantRow>();
 }
@@ -269,6 +279,7 @@ export const token: Handler = async (cx) => {
     if (b.redirect_uri !== undefined && b.redirect_uri !== row.redirect_uri) return oauthError("invalid_grant", "redirect_uri does not match");
     const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(b.code_verifier)));
     if (challenge !== row.code_challenge) return oauthError("invalid_grant", "code_verifier does not match");
+    if (await isSuspended(cx.env, row.user_id)) return SUSPENDED;
     const used = await cx.env.DB.prepare("UPDATE oauth_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL").bind(now(), hash).run();
     if (used.meta.changes === 0) return oauthError("invalid_grant", "code already used");
     const assistant = await liveAssistant(cx.env, row.user_id, row.assistant_id);
@@ -281,6 +292,7 @@ export const token: Handler = async (cx) => {
   const row = await cx.env.DB.prepare("SELECT * FROM oauth_refresh WHERE credential_hash = ?").bind(hash).first<any>();
   if (!row) return oauthError("invalid_grant", "unknown refresh credential");
   if (b.client_id !== undefined && b.client_id !== row.client_id) return oauthError("invalid_grant", "client_id does not match");
+  if (await isSuspended(cx.env, row.user_id)) return SUSPENDED;
   const rotated = row.rotated_at ? { meta: { changes: 0 } } : await cx.env.DB.prepare("UPDATE oauth_refresh SET rotated_at = ? WHERE credential_hash = ? AND rotated_at IS NULL").bind(now(), hash).run();
   if (rotated.meta.changes === 0) {
     await dropAssistantCredentials(cx.env, row.user_id, row.assistant_id);

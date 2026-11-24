@@ -75,7 +75,8 @@ export async function composeNotification(env: Env, user: UserRow, events: { ite
 /** Sends every batch whose wait is over. Returns how many notifications went out. */
 export async function sendDueNotifications(env: Env): Promise<number> {
   const t = now();
-  const due = await env.DB.prepare("SELECT * FROM notify_batches WHERE last_at <= ? OR first_at <= ? LIMIT 10")
+  const due = await env.DB.prepare(`SELECT * FROM notify_batches WHERE (last_at <= ? OR first_at <= ?)
+     AND user_id NOT IN (SELECT id FROM users WHERE suspended_at IS NOT NULL) LIMIT 10`)
     .bind(t - LIMITS.notify_wait_seconds * SECOND, t - LIMITS.notify_max_wait_seconds * SECOND)
     .all<Batch>();
   let sent = 0;

@@ -183,7 +183,7 @@ function monthSvg(cal: CalendarMonth, x0: number, y0: number, cell: number, c: (
 export async function calendarImage(env: Env, secret: string, params: URLSearchParams): Promise<Response> {
   const notFound = new Response(null, { status: 404 });
   if (!/^[A-Za-z0-9_-]{16,}$/.test(secret)) return notFound;
-  const user = await env.DB.prepare("SELECT * FROM users WHERE calendar_secret = ? AND calendar_enabled = 1").bind(secret).first<UserRow>();
+  const user = await env.DB.prepare("SELECT * FROM users WHERE calendar_secret = ? AND calendar_enabled = 1 AND suspended_at IS NULL").bind(secret).first<UserRow>();
   if (!user) return notFound;
   const theme = THEMES[(params.get("theme") ?? "light") as keyof typeof THEMES] ?? THEMES.light;
   const year = params.get("range") === "year";

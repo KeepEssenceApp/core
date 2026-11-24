@@ -23,6 +23,8 @@ export interface Env {
   DELETE_COPIES_ON_USER_DELETE?: string;
   ARCHIVE_RETENTION_DAYS?: string;
   PAGE_FETCH_TIMEOUT_MS?: string;
+  /** Optional: what GET /admin/overview reports as the version (defaults to the package version). */
+  CORE_VERSION?: string;
 
   LLM_API_KEY?: string;
   ADMIN_SECRET?: string;

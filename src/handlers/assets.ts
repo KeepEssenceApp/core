@@ -92,7 +92,10 @@ export const getAsset: Handler = async (cx) => {
 /** PUT /v1/uploads/{id}?exp&sig. The signature is the credential; it locks the byte count and the type. */
 export async function handleUpload(env: Env, request: Request, id: string): Promise<Response> {
   const url = new URL(request.url);
-  const asset = await env.DB.prepare("SELECT * FROM assets WHERE id = ? AND user_id = ?").bind(id, url.searchParams.get("u") ?? "").first<AssetRow>();
+  // A signed address of a suspended account stops working like its other credentials.
+  const asset = await env.DB.prepare(`SELECT a.* FROM assets a JOIN users u ON u.id = a.user_id AND u.suspended_at IS NULL WHERE a.id = ? AND a.user_id = ?`)
+    .bind(id, url.searchParams.get("u") ?? "")
+    .first<AssetRow>();
   if (!asset || !(await verifyUpload(env, asset, url.searchParams.get("exp"), url.searchParams.get("sig")))) throw err("unauthorized");
   if (asset.status !== "pending") throw err("conflict");
   const length = Number(request.headers.get("content-length") ?? "NaN");
@@ -133,7 +136,13 @@ export async function handleDownload(env: Env, request: Request, id: string): Pr
   const url = new URL(request.url);
   const userId = url.searchParams.get("u") ?? "";
   if (!(await verifyDownload(env, userId, id, url.searchParams.get("exp"), url.searchParams.get("sig")))) throw err("unauthorized");
-  const asset = await env.DB.prepare("SELECT * FROM assets WHERE id = ? AND user_id = ? AND status = 'stored'").bind(id, userId).first<AssetRow>();
+  const asset = await env.DB.prepare(
+    `SELECT a.*, u.suspended_at AS owner_suspended_at FROM assets a JOIN users u ON u.id = a.user_id
+     WHERE a.id = ? AND a.user_id = ? AND a.status = 'stored'`,
+  )
+    .bind(id, userId)
+    .first<AssetRow & { owner_suspended_at: number | null }>();
+  if (asset && asset.owner_suspended_at !== null) throw err("unauthorized");
   const object = asset ? await env.FILES.get(asset.r2_key) : null;
   if (!asset || !object) throw err("not_found");
   return new Response(object.body, {

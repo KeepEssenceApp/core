@@ -12,7 +12,8 @@ import * as items from "./handlers/items";
 import * as oauth from "./handlers/oauth";
 import * as reading from "./handlers/reading";
 import * as settings from "./handlers/settings";
-import { adminInvites, adminLoginCode, getMeta, requestLoginCode, signIn } from "./handlers/signin";
+import { ADMIN_ROUTES, runAdmin } from "./handlers/admin";
+import { getMeta, requestLoginCode, signIn } from "./handlers/signin";
 import { handleMcp } from "./mcp";
 import { authAssistant, authDevice, bearerOf, tierAllows } from "./services/accounts";
 import type { Cx, Handler, Result } from "./types";
@@ -94,10 +95,8 @@ const PRECHECKS: Record<string, (body: Record<string, any>) => void> = {
 export const EXTRA_ROUTES: { method: string; path: string; why: string }[] = [
   { method: "PUT", path: "/v1/uploads/{id}", why: "the signed upload address that POST /v1/assets hands out" },
   { method: "GET", path: "/v1/downloads/{id}", why: "the signed download address that GET /v1/assets/{id} hands out" },
-  { method: "POST", path: "/admin/invites", why: "operator: invite an email address" },
-  { method: "GET", path: "/admin/invites", why: "operator: list invited addresses" },
-  { method: "DELETE", path: "/admin/invites", why: "operator: remove an invitation" },
-  { method: "POST", path: "/admin/login-codes", why: "operator: mint a sign-in code to pass on" },
+  // The operator (admin) interface: docs/admin-api.md. One list, in handlers/admin.ts.
+  ...ADMIN_ROUTES.map((r) => ({ method: r.method, path: r.path, why: r.why })),
 ];
 
 /** `/v1/items/{id}` → `/v1/items/:id`; `/c/{secret}.svg` → `/c/:secret{[^/]+\\.svg}`. */
@@ -219,10 +218,15 @@ export function buildApp(): Hono<{ Bindings: Env }> {
   };
   app.put("/v1/uploads/:id", guarded(handleUpload));
   app.get("/v1/downloads/:id", guarded(handleDownload));
-  app.post("/admin/invites", guarded((env, req) => adminInvites(env, req)));
-  app.get("/admin/invites", guarded((env, req) => adminInvites(env, req)));
-  app.delete("/admin/invites", guarded((env, req) => adminInvites(env, req)));
-  app.post("/admin/login-codes", guarded((env, req) => adminLoginCode(env, req)));
+  for (const route of ADMIN_ROUTES) {
+    app.on(route.method, honoPath(route.path), async (c) => {
+      try {
+        return await runAdmin(route, c.env, c.req.raw, c.req.param() as Record<string, string>);
+      } catch (e) {
+        return errorResponse(e, pickLang(c.req.header("accept-language")));
+      }
+    });
+  }
 
   const known = CONTRACT.operations.map((op) => ({ method: op.method, match: new RegExp("^" + op.path.replace(/\{\w+\}/g, "[^/]+").replace(/\./g, "\\.") + "$") }));
   app.notFound((c) => {

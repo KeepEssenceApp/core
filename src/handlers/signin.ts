@@ -1,10 +1,10 @@
-// Meta, sign-in by email code, and the operator's admin endpoints (invites, hand-out codes).
+// Meta and sign-in by email code. The operator's side (invitations, hand-out codes) is in handlers/admin.ts.
 import { CONTRACT } from "../generated/contract";
 import { MINUTE, now } from "../clock";
 import { LIMITS, num, outbound, type Env } from "../env";
 import { err, type Lang } from "../errors";
 import { validTimezone } from "../time";
-import { NO_CONTENT, ok, type Handler } from "../types";
+import { ok, type Handler } from "../types";
 import { safeEqual, sha256Hex } from "../util";
 import { createDevice, createUser, deviceView, userView } from "../services/accounts";
 import { ipKey, rateLimit } from "../services/guard";
@@ -23,6 +23,16 @@ async function codeHash(email: string, code: string): Promise<string> {
 
 export async function isInvited(env: Env, email: string): Promise<boolean> {
   return (await env.DB.prepare("SELECT 1 FROM invites WHERE email = ?").bind(email).first()) !== null;
+}
+
+/** Invited, and not an account the operator suspended. One query. */
+export async function maySignIn(env: Env, email: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT (SELECT suspended_at FROM users WHERE email = ?1) AS suspended_at FROM invites WHERE email = ?1",
+  )
+    .bind(email)
+    .first<{ suspended_at: number | null }>();
+  return row !== null && row.suspended_at === null;
 }
 
 /** A fresh 6-digit code for the address. It replaces any earlier one. */
@@ -59,8 +69,8 @@ async function mailCode(env: Env, email: string, code: string, lang: Lang): Prom
 export const requestLoginCode: Handler = async (cx) => {
   await rateLimit(cx.env, `login-code:${await ipKey(cx.env, cx.request)}`, num(cx.env.PUBLIC_RATE_PER_10_MIN, 30), 10 * MINUTE);
   const email = normalEmail(cx.body.email);
-  // The answer never says whether the address is invited.
-  if (await isInvited(cx.env, email)) {
+  // The answer never says whether the address is invited, nor whether the account is suspended.
+  if (await maySignIn(cx.env, email)) {
     let allowed = true;
     try {
       await rateLimit(cx.env, `login-code-email:${await sha256Hex(email)}`, 5, 10 * MINUTE);
@@ -85,7 +95,7 @@ export const signIn: Handler = async (cx) => {
   const row = await env.DB.prepare("SELECT * FROM login_codes WHERE email = ?")
     .bind(email)
     .first<{ code_hash: string; attempts: number; expires_at: number }>();
-  if (!row || row.expires_at <= now() || row.attempts >= LIMITS.login_code_max_attempts || !(await isInvited(env, email))) throw wrong;
+  if (!row || row.expires_at <= now() || row.attempts >= LIMITS.login_code_max_attempts || !(await maySignIn(env, email))) throw wrong;
   if (!(await safeEqual(row.code_hash, await codeHash(email, cx.body.code)))) {
     await env.DB.prepare("UPDATE login_codes SET attempts = attempts + 1 WHERE email = ?").bind(email).run();
     throw wrong;
@@ -99,49 +109,3 @@ export const signIn: Handler = async (cx) => {
   const { device, credential } = await createDevice(env, user.id, cx.body.device_name.trim(), cx.body.client, "manage", true);
   return ok({ credential, device: deviceView(device, device.id, false), user: userView(user) }, 201);
 };
-
-// ---------------------------------------------------------------- admin (not part of the contract)
-
-async function requireAdmin(env: Env, request: Request): Promise<void> {
-  if (!env.ADMIN_SECRET) throw err("not_found");
-  const header = request.headers.get("authorization") ?? "";
-  const m = header.match(/^Bearer\s+(.+)$/i);
-  if (!m || !(await safeEqual(m[1].trim(), env.ADMIN_SECRET))) throw err("unauthorized");
-}
-
-async function emailFrom(request: Request): Promise<string> {
-  const body = (await request.json().catch(() => null)) as { email?: unknown } | null;
-  const email = typeof body?.email === "string" ? normalEmail(body.email) : "";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-    throw err("bad_request", "需要一个邮箱地址：{\"email\": \"…\"}。", 'An email address is needed: {"email": "…"}.');
-  }
-  return email;
-}
-
-export async function adminInvites(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request);
-  if (request.method === "GET") {
-    const rows = await env.DB.prepare("SELECT email, created_at FROM invites ORDER BY created_at").all<{ email: string; created_at: number }>();
-    return Response.json({ invites: rows.results.map((r) => ({ email: r.email, created_at: new Date(r.created_at).toISOString() })) });
-  }
-  const email = await emailFrom(request);
-  if (request.method === "POST") {
-    await env.DB.prepare("INSERT OR IGNORE INTO invites (email, created_at) VALUES (?, ?)").bind(email, now()).run();
-    return Response.json({ email }, { status: 201 });
-  }
-  // DELETE: the address can no longer sign in. Devices that are already connected keep working.
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM invites WHERE email = ?").bind(email),
-    env.DB.prepare("DELETE FROM login_codes WHERE email = ?").bind(email),
-  ]);
-  return new Response(null, { status: 204 });
-}
-
-/** Mints a code for an invited address and returns it, so the operator can pass it on. */
-export async function adminLoginCode(env: Env, request: Request): Promise<Response> {
-  await requireAdmin(env, request);
-  const email = await emailFrom(request);
-  if (!(await isInvited(env, email))) throw err("not_invited");
-  const { code, expiresAt } = await mintLoginCode(env, email);
-  return Response.json({ email, code, expires_at: new Date(expiresAt).toISOString() }, { status: 201 });
-}

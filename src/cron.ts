@@ -12,6 +12,19 @@ import { sendDueNotifications } from "./services/notify";
 import { applyTriageDefaults } from "./services/work";
 import type { ItemRow, UserRow } from "./types";
 
+/** Accounts the operator suspended: the cron work passes them by, so they never take a slot of a run. */
+const NOT_SUSPENDED = "NOT IN (SELECT id FROM users WHERE suspended_at IS NOT NULL)";
+
+export const CRON_KEYS = { minute: "cron.minute_ran_at", hourly: "cron.hourly_ran_at" } as const;
+
+/** Notes when a cron job last finished; GET /admin/overview reports it. */
+async function recordRun(env: Env, key: string): Promise<void> {
+  const t = now();
+  await env.DB.prepare("INSERT INTO core_state (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT (key) DO UPDATE SET value = ?2, updated_at = ?3")
+    .bind(key, String(t), t)
+    .run();
+}
+
 async function step(name: string, fn: () => Promise<unknown>): Promise<void> {
   try {
     await fn();
@@ -24,7 +37,8 @@ async function step(name: string, fn: () => Promise<unknown>): Promise<void> {
 export async function fetchFallback(env: Env): Promise<void> {
   const rows = await env.DB.prepare(
     `UPDATE items SET fetch_attempts = fetch_attempts + 1
-     WHERE id IN (SELECT id FROM items WHERE fetch_state = 'pending' AND archived_at IS NULL AND created_at <= ? ORDER BY created_at LIMIT 3)
+     WHERE id IN (SELECT id FROM items WHERE fetch_state = 'pending' AND archived_at IS NULL AND created_at <= ?
+       AND user_id ${NOT_SUSPENDED} ORDER BY created_at LIMIT 3)
      RETURNING id, user_id, url, title, title_from, body, fetch_attempts`,
   )
     .bind(now() - MINUTE)
@@ -46,8 +60,9 @@ export async function fetchFallback(env: Env): Promise<void> {
 export async function triageDefaults(env: Env): Promise<void> {
   const after = LIMITS.triage_default_after_minutes * MINUTE;
   const users = await env.DB.prepare(
-    `SELECT u.* FROM users u WHERE u.id IN (
-       SELECT DISTINCT user_id FROM items WHERE triaged_at IS NULL AND archived_at IS NULL AND created_at <= ? LIMIT 10)`,
+    `SELECT u.* FROM users u WHERE u.suspended_at IS NULL AND u.id IN (
+       SELECT DISTINCT user_id FROM items WHERE triaged_at IS NULL AND archived_at IS NULL AND created_at <= ?
+       AND user_id ${NOT_SUSPENDED} LIMIT 10)`,
   )
     .bind(now() - after)
     .all<UserRow>();
@@ -59,7 +74,7 @@ async function runBuiltIns(env: Env, origin: string): Promise<void> {
   const t = now();
   const triage = await env.DB.prepare(
     `SELECT DISTINCT user_id FROM items WHERE triaged_at IS NULL AND archived_at IS NULL AND fetch_state <> 'pending'
-     AND (claim_id IS NULL OR claim_expires_at <= ?) ORDER BY created_at LIMIT ?`,
+     AND (claim_id IS NULL OR claim_expires_at <= ?) AND user_id ${NOT_SUSPENDED} ORDER BY created_at LIMIT ?`,
   )
     .bind(t, num(env.TRIAGE_USERS_PER_RUN, 3))
     .all<{ user_id: string }>();
@@ -68,7 +83,7 @@ async function runBuiltIns(env: Env, origin: string): Promise<void> {
   const analysis = await env.DB.prepare(
     `SELECT DISTINCT i.user_id FROM items i JOIN assistants a ON a.id = i.dispatch_to AND a.user_id = i.user_id
      WHERE a.built_in = 'worker' AND i.triaged_at IS NOT NULL AND i.analysed_at IS NULL AND i.archived_at IS NULL AND i.fetch_state <> 'pending'
-     AND (i.claim_id IS NULL OR i.claim_expires_at <= ?) ORDER BY i.created_at LIMIT ?`,
+     AND (i.claim_id IS NULL OR i.claim_expires_at <= ?) AND i.user_id ${NOT_SUSPENDED} ORDER BY i.created_at LIMIT ?`,
   )
     .bind(now(), num(env.ANALYSIS_USERS_PER_RUN, 2))
     .all<{ user_id: string }>();
@@ -76,7 +91,8 @@ async function runBuiltIns(env: Env, origin: string): Promise<void> {
 
   const digests = await env.DB.prepare(
     `SELECT u.* FROM users u JOIN assistants a ON a.id = u.role_digest AND a.user_id = u.id AND a.built_in = 'worker'
-     WHERE u.id IN (SELECT DISTINCT user_id FROM items WHERE analysed_at IS NOT NULL AND digest_day IS NULL AND archived_at IS NULL) LIMIT 50`,
+     WHERE u.suspended_at IS NULL
+       AND u.id IN (SELECT DISTINCT user_id FROM items WHERE analysed_at IS NOT NULL AND digest_day IS NULL AND archived_at IS NULL) LIMIT 50`,
   ).all<UserRow>();
   let written = 0;
   for (const user of digests.results) {
@@ -93,6 +109,7 @@ export async function runMinute(env: Env): Promise<void> {
   await step("triage-defaults", () => triageDefaults(env));
   await runBuiltIns(env, origin);
   await step("notify", () => sendDueNotifications(env));
+  await step("record", () => recordRun(env, CRON_KEYS.minute));
 }
 
 /** Expiry: an item past its term is archived. Pinned items never are; queued items wait, but not past their hard limit. */
@@ -165,4 +182,5 @@ export async function runHourly(env: Env): Promise<void> {
   await step("queue", () => cleanQueue(env));
   await step("assets", () => cleanAssets(env));
   await step("tables", () => cleanTables(env));
+  await step("record", () => recordRun(env, CRON_KEYS.hourly));
 }

@@ -44,6 +44,7 @@ export async function authDevice(env: Env, bearer: string | null): Promise<{ dev
     .first<DeviceRow>();
   if (!device || !deviceIsLive(device)) throw err("unauthorized");
   const user = await getUser(env, device.user_id);
+  if (user.suspended_at !== null) throw err("unauthorized"); // suspended by the operator
   const t = now();
   if (!device.last_used_at || t - device.last_used_at > MINUTE) {
     await env.DB.prepare("UPDATE devices SET last_used_at = ? WHERE id = ? AND user_id = ?").bind(t, device.id, user.id).run();
@@ -68,6 +69,7 @@ export async function authAssistant(env: Env, bearer: string | null): Promise<As
   if (!bearer) throw err("unauthorized");
   const row = await env.DB.prepare(
     `SELECT a.* FROM oauth_access c JOIN assistants a ON a.id = c.assistant_id AND a.user_id = c.user_id
+     JOIN users u ON u.id = a.user_id AND u.suspended_at IS NULL
      WHERE c.credential_hash = ? AND c.expires_at > ? AND a.revoked_at IS NULL`,
   )
     .bind(await sha256Hex(bearer), now())
@@ -80,11 +82,30 @@ export async function authAssistant(env: Env, bearer: string | null): Promise<As
   return actorOf(row);
 }
 
+/** The built-in assistant of a user, for the cron work. Null for a suspended account: nothing is done for it. */
 export async function builtinActor(env: Env, userId: string, which: "dispatch" | "worker"): Promise<AssistantActor | null> {
-  const row = await env.DB.prepare("SELECT * FROM assistants WHERE user_id = ? AND built_in = ? AND revoked_at IS NULL")
+  const row = await env.DB.prepare(
+    `SELECT a.* FROM assistants a JOIN users u ON u.id = a.user_id AND u.suspended_at IS NULL
+     WHERE a.user_id = ? AND a.built_in = ? AND a.revoked_at IS NULL`,
+  )
     .bind(userId, which)
     .first<AssistantRow>();
   return row ? actorOf(row) : null;
+}
+
+/** Is this account suspended by the operator? Unknown accounts count as not suspended. */
+export async function isSuspended(env: Env, userId: string): Promise<boolean> {
+  return (await env.DB.prepare("SELECT 1 FROM users WHERE id = ? AND suspended_at IS NOT NULL").bind(userId).first()) !== null;
+}
+
+/** Statements that put back everything every assistant of the account holds. */
+export function releaseAllClaimsStatements(env: Env, userId: string): D1PreparedStatement[] {
+  return [
+    env.DB.prepare("UPDATE items SET claim_id = NULL, claim_expires_at = NULL WHERE user_id = ? AND claim_id IS NOT NULL").bind(userId),
+    env.DB.prepare("UPDATE digests SET claim_id = NULL, claim_expires_at = NULL WHERE user_id = ? AND claim_id IS NOT NULL").bind(userId),
+    env.DB.prepare("UPDATE deep_read_queue SET claim_id = NULL, claim_expires_at = NULL WHERE user_id = ? AND claim_id IS NOT NULL").bind(userId),
+    env.DB.prepare("UPDATE claims SET status = 'released' WHERE user_id = ? AND status = 'active'").bind(userId),
+  ];
 }
 
 const BUILTIN_NAMES: Record<"dispatch" | "worker", Record<Lang, string>> = {

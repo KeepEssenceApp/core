@@ -23,6 +23,8 @@ export interface UserRow {
   calendar_enabled: number;
   calendar_secret: string | null;
   created_at: number;
+  /** Set by the operator: while it is set, nothing of this account works. */
+  suspended_at: number | null;
 }
 
 export interface DeviceRow {
