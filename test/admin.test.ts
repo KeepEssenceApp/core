@@ -230,10 +230,10 @@ describe("admin overview", () => {
 
   it("admin overview: the config flags say what is configured without showing any secret", async () => {
     const bare = await admin(makeEnv({ LLM_MODEL: "" }), "GET", "/admin/overview");
-    expect(bare.json.config).toEqual({ model: "claude-haiku-5-5", model_configured: false, mail_configured: false, push_configured: false, version: "0.0.0-development" });
+    expect(bare.json.config).toEqual({ model: "claude-haiku-5-5", model_configured: false, mail_configured: false, push_configured: false, mail_last: null, version: "0.0.0-development" });
     const secrets = { LLM_API_KEY: "secret-model-key", RESEND_API_KEY: "secret-mail-key", EMAIL_FROM: "Sign in <login@example.com>", VAPID_PRIVATE_KEY: "secret-vapid-private", VAPID_PUBLIC_KEY: "vapid-public" };
     const full = await admin(makeEnv({ ...secrets, LLM_MODEL: "some-model", CORE_VERSION: "1.4.0" }), "GET", "/admin/overview");
-    expect(full.json.config).toEqual({ model: "some-model", model_configured: true, mail_configured: true, push_configured: true, version: "1.4.0" });
+    expect(full.json.config).toEqual({ model: "some-model", model_configured: true, mail_configured: true, push_configured: true, mail_last: null, version: "1.4.0" });
     for (const value of [...Object.values(secrets), ADMIN, "test-signing-key"]) expect(full.text).not.toContain(value);
     // Half of a pair is not "configured".
     const half = await admin(makeEnv({ RESEND_API_KEY: "k", VAPID_PUBLIC_KEY: "p" }), "GET", "/admin/overview");

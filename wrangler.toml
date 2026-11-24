@@ -31,12 +31,20 @@ bucket_name = "keepessence-assets"
 binding = "WEB"
 service = "keepessence-web"
 
+# Sign-in codes by email through the platform's own mail sending. The sender's domain must be
+# onboarded for sending in the Cloudflare dashboard (Email Service). Self-hosters without it:
+# remove this block and set RESEND_API_KEY instead, or leave both out and hand codes out by hand.
+[[send_email]]
+name = "EMAIL"
+
 [vars]
 # Where the web app lives (allow page, approve page). Also the browser origin allowed by CORS.
 APP_ORIGIN = "https://keepessence.app"
 # Model endpoint in the Anthropic Messages API format; the key is the secret LLM_API_KEY.
 LLM_BASE_URL = "https://cliapi.yan.today"
 LLM_MODEL = "claude-haiku-5-5"
+# The address sign-in codes are sent from.
+EMAIL_FROM = "KeepEssence <login@keepessence.app>"
 # Set to "1" only for local development over plain http.
 ALLOW_HTTP = "0"
 # Tunable limits (strings; empty or missing means the default written here).

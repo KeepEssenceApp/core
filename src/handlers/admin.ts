@@ -15,7 +15,7 @@ import { DEFAULT_MODEL } from "../services/model";
 import { likePattern } from "../services/work";
 import { addDays, localDay } from "../time";
 import { b64url, fromB64url, iso, newId, parseJson, safeEqual } from "../util";
-import { mintLoginCode, normalEmail } from "./signin";
+import { mailConfigured, mintLoginCode, normalEmail } from "./signin";
 
 type Params = Record<string, string>;
 type AdminHandler = (env: Env, request: Request, params: Params) => Promise<Response>;
@@ -235,7 +235,7 @@ const getOverview: AdminHandler = async (env) => {
               COALESCE(SUM(CASE WHEN created_at >= ?1 THEN output_tokens END), 0) AS today_output_tokens
        FROM usage_records WHERE self_reported = 0 AND created_at >= ?2`,
     ).bind(today, Math.min(week, today)),
-    env.DB.prepare("SELECT key, value FROM core_state WHERE key IN (?, ?)").bind(CRON_KEYS.minute, CRON_KEYS.hourly),
+    env.DB.prepare("SELECT key, value, updated_at FROM core_state WHERE key IN (?, ?, 'mail.last')").bind(CRON_KEYS.minute, CRON_KEYS.hourly),
   ]);
   const one = (r: { results: any[] }) => r.results[0] ?? {};
   const ranAt = (key: string): string | null => {
@@ -244,6 +244,9 @@ const getOverview: AdminHandler = async (env) => {
     return Number.isFinite(ms) ? iso(ms) : null;
   };
   const u = one(usage);
+  // The outcome of the last sign-in mail: "sent", or why it failed. Never an address or a code.
+  const mailRow = state.results.find((r: any) => r.key === "mail.last") as { value: string; updated_at: number } | undefined;
+  const mailLast = mailRow ? { at: iso(Number(mailRow.updated_at)), result: String(mailRow.value).slice(0, 200) } : null;
   return json({
     users: { total: one(users).total ?? 0, active_7d: one(active7d).n ?? 0, suspended: one(users).suspended ?? 0 },
     invites: { total: one(invites).total ?? 0, pending: one(invites).pending ?? 0 },
@@ -260,7 +263,8 @@ const getOverview: AdminHandler = async (env) => {
     config: {
       model: env.LLM_MODEL || DEFAULT_MODEL,
       model_configured: Boolean(env.LLM_API_KEY),
-      mail_configured: Boolean(env.RESEND_API_KEY && env.EMAIL_FROM),
+      mail_configured: mailConfigured(env),
+      mail_last: mailLast,
       push_configured: Boolean(env.VAPID_PRIVATE_KEY && env.VAPID_PUBLIC_KEY),
       version: env.CORE_VERSION || pkg.version,
     },

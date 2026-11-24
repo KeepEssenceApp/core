@@ -51,18 +51,41 @@ const MAIL_TEXT: Record<Lang, (code: string, minutes: number) => { subject: stri
   en: (code, minutes) => ({ subject: `Sign-in code ${code}`, text: `Your sign-in code is ${code}. It is valid for ${minutes} minutes and can be used once.\nIf you did not try to sign in, ignore this email.` }),
 };
 
+/** True when sign-in codes can be emailed: a sender address plus either the platform's mail binding or a Resend key. */
+export function mailConfigured(env: Env): boolean {
+  return Boolean(env.EMAIL_FROM && (env.EMAIL || env.RESEND_API_KEY));
+}
+
+/** Remembers how the last sign-in mail went, for the operator's overview. */
+async function noteMail(env: Env, result: string): Promise<void> {
+  await env.DB.prepare("INSERT INTO core_state (key, value, updated_at) VALUES ('mail.last', ?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?2")
+    .bind(result.replace(/[^\s@]+@[^\s@]+/g, "<address>").slice(0, 200), now())
+    .run()
+    .catch(() => {});
+}
+
 async function mailCode(env: Env, email: string, code: string, lang: Lang): Promise<void> {
-  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return; // no mail provider: the operator hands the code out
+  if (!mailConfigured(env)) return; // no mail provider: the operator hands the code out
   const { subject, text } = MAIL_TEXT[lang](code, LIMITS.login_code_minutes);
   try {
+    if (env.EMAIL) {
+      await env.EMAIL.send({ to: email, from: env.EMAIL_FROM!, subject, text });
+      await noteMail(env, "sent");
+      return;
+    }
     const response = await outbound(env, "https://api.resend.com/emails", {
       method: "POST",
       headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
       body: JSON.stringify({ from: env.EMAIL_FROM, to: [email], subject, text }),
     });
+    if (!response.ok) console.warn(`sign-in mail refused: ${response.status}`);
+    await noteMail(env, response.ok ? "sent" : `refused: ${response.status}`);
     await response.body?.cancel().catch(() => {});
-  } catch {
-    // The answer is 202 either way; the user can ask again.
+  } catch (e) {
+    // The answer is 202 either way; the user can ask again. Say why in the log, never the code or the address.
+    const why = e instanceof Error ? e.message.replace(/[^\s@]+@[^\s@]+/g, "<address>") : "unknown";
+    console.warn("sign-in mail failed", why);
+    await noteMail(env, `failed: ${why}`);
   }
 }
 

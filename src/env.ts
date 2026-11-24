@@ -33,6 +33,8 @@ export interface Env {
   VAPID_PUBLIC_KEY?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  /** Optional: the platform's own mail sending (a `send_email` binding). Used before RESEND_API_KEY. */
+  EMAIL?: { send(message: { to: string; from: string; subject: string; text: string; html?: string }): Promise<unknown> };
 
   /** Tests only: replaces every outbound request (pages, model, push, mail, client metadata). */
   OUTBOUND?: (input: string, init?: RequestInit) => Promise<Response>;
