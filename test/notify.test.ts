@@ -277,3 +277,10 @@ describe("K18 notifications", () => {
     expect(analysed).toBeTruthy();
   });
 });
+
+describe("K18 notify payload", () => {
+  it("K18 notify: the payload has exactly the fields the contract names", async () => {
+    const { CONTRACT } = await import("../src/generated/contract");
+    expect(CONTRACT.sharedRules.push_payload.fields).toEqual(["body", "count", "item_id", "kind"]);
+  });
+});

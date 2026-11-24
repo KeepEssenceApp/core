@@ -1,7 +1,7 @@
 // Scheduled work. Every minute: page fetch fallback, the core's triage defaults, the built-in
 // assistants, notifications. Every hour: expiry and cleanup. Batches are small so that one run
 // stays light.
-import { DAY, HOUR, MINUTE, now } from "./clock";
+import { DAY, MINUTE, now } from "./clock";
 import { analyseForUser, digestForUser, dispatchForUser, modelConfigured } from "./builtin";
 import { LIMITS, num, type Env } from "./env";
 import { purgeItemStatements } from "./handlers/items";
@@ -166,5 +166,3 @@ export async function runHourly(env: Env): Promise<void> {
   await step("assets", () => cleanAssets(env));
   await step("tables", () => cleanTables(env));
 }
-
-export { HOUR };

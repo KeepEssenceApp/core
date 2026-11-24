@@ -4,9 +4,8 @@ import { LIMITS, num, type Env } from "../env";
 import { err } from "../errors";
 import { NO_CONTENT, ok, type Cx, type Handler, type ItemRow, type Result } from "../types";
 import { decodeCursor, encodeCursor, firstSentence, newId, parseJson, truncate } from "../util";
-import { listAssistants, tierAllows } from "../services/accounts";
+import { listAssistants } from "../services/accounts";
 import { deleteIfUnreferenced, refStatement, type AssetRow } from "../services/assets";
-import { isPublicUrl } from "../services/fetchpage";
 import { idempotent, rateLimit } from "../services/guard";
 import {
   cleanTitle,
@@ -296,5 +295,3 @@ export const clearSignal: Handler = async (cx) => {
   await cx.env.DB.prepare("UPDATE items SET signal = NULL WHERE id = ? AND user_id = ?").bind(item.id, cx.user!.id).run();
   return NO_CONTENT;
 };
-
-export { tierAllows, isPublicUrl };

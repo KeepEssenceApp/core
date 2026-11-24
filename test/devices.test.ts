@@ -109,14 +109,13 @@ describe("K3 devices", () => {
     expect((await call(env, "GET", "/v1/devices", { token: ann.token })).json.devices).toHaveLength(1);
   });
 
-  it("K3 devices: the last manage device cannot be lowered, revoked or signed out", async () => {
+  it("K3 devices: the last manage device cannot be lowered or revoked; signing out is always allowed", async () => {
     const env = makeEnv();
     const ann = await signIn(env);
     await connectDevice(env, ann, "read");
     for (const r of [
       await call(env, "PATCH", `/v1/devices/${ann.deviceId}`, { token: ann.token, body: { tier: "read" } }),
       await call(env, "DELETE", `/v1/devices/${ann.deviceId}`, { token: ann.token }),
-      await call(env, "DELETE", "/v1/devices/me", { token: ann.token }),
     ]) {
       expect(r.status).toBe(409);
       expect(r.json.error.code).toBe("last_manager");
@@ -126,7 +125,14 @@ describe("K3 devices", () => {
     const second = await call(env, "POST", "/v1/auth/sessions", { body: { email: ann.email, code, device_name: "Second", client: "phone", timezone: TZ } });
     expect((await call(env, "DELETE", "/v1/devices/me", { token: ann.token })).status).toBe(204);
     expect((await call(env, "GET", "/v1/devices/me", { token: ann.token })).status).toBe(401);
-    expect((await call(env, "DELETE", "/v1/devices/me", { token: second.json.credential })).status).toBe(409);
+    // Now `second` is the last manage device: it cannot be revoked from the list, but it can sign out,
+    // and the user gets back in by email.
+    expect((await call(env, "DELETE", `/v1/devices/${second.json.device.id}`, { token: second.json.credential })).status).toBe(409);
+    expect((await call(env, "DELETE", "/v1/devices/me", { token: second.json.credential })).status).toBe(204);
+    expect((await call(env, "GET", "/v1/devices/me", { token: second.json.credential })).status).toBe(401);
+    const again = await call(env, "POST", "/v1/auth/sessions", { body: { email: ann.email, code: await loginCode(env, ann.email), device_name: "Back again", client: "web", timezone: TZ } });
+    expect(again.json.device.tier).toBe("manage");
+    expect(again.json.user.id).toBe(ann.userId);
   });
 
   it("K3 devices: a device idle for 90 days stops working; a device in use keeps working", async () => {

@@ -785,5 +785,3 @@ export async function registerDeepDive(env: Env, actor: AssistantActor, itemId: 
   await recordDeepDive(env, user, item, actor.assistantId);
   return { item_id: item.id };
 }
-
-export type { AssistantRow, DigestRow };

@@ -61,7 +61,7 @@ describe("K13 user actions", () => {
     const { ann, ids } = await withDigest(env, ["First thought.", "Second thought."]);
     const added = await call(env, "PUT", `/v1/deep-read-queue/${ids[0]}`, { token: ann.token });
     expect(added.status).toBe(200);
-    expect(added.json).toMatchObject({ item_id: ids[0], title: "First thought.", deep_read: "waiting", report: null, went_at: null, fetched_at: null });
+    expect(added.json).toMatchObject({ item_id: ids[0], title: "First thought.", deep_read: "waiting", report: null, went_at: null, went_to: null, fetched_at: null });
     let d = await get(env, ann.token, "/v1/digests/latest");
     expect(d.worth.map((w: any) => w.item_id)).toEqual([ids[1]]);
     expect(d.rest[0]).toMatchObject({ item_id: ids[0], in_queue: true, can_restore: true });
@@ -99,7 +99,9 @@ describe("K13 user actions", () => {
     const id = await saveText(env, ann.token, "A thought to dig into.", "Tea and water");
     await call(env, "PUT", `/v1/deep-read-queue/${id}`, { token: ann.token });
     await call(env, "POST", "/v1/deep-dive-requests", { token: ann.token, body: { item_id: id } });
-    expect((await get(env, ann.token, "/v1/deep-read-queue")).entries[0].went_at).not.toBeNull();
+    const went = (await get(env, ann.token, "/v1/deep-read-queue")).entries[0];
+    expect(went.went_at).not.toBeNull();
+    expect(went.went_to).toEqual({ id: chat.assistantId, name: "Talker" });
     const key = idem();
     const body = { title: "What I learnt about tea", body: "Cooler water. Shorter steeping.", item_id: id };
     const note = await call(env, "POST", "/v1/notes", { token: ann.token, body, idem: key });

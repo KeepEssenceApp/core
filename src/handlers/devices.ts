@@ -144,16 +144,17 @@ export const getThisDevice: Handler = async (cx) => {
   return ok({ device: deviceView(cx.device!, cx.device!.id, push !== null), user: userView(cx.user!) });
 };
 
-async function revokeClientDevice(cx: Parameters<Handler>[0], device: DeviceRow): Promise<void> {
-  if (device.tier === "manage") await assertNotLastManager(cx.env, cx.user!.id, device.id);
+async function revokeClientDevice(cx: Parameters<Handler>[0], device: DeviceRow, guardLastManager = true): Promise<void> {
+  if (guardLastManager && device.tier === "manage") await assertNotLastManager(cx.env, cx.user!.id, device.id);
   await cx.env.DB.batch([
     cx.env.DB.prepare("UPDATE devices SET revoked_at = ?, credential_hash = NULL WHERE id = ? AND user_id = ?").bind(now(), device.id, cx.user!.id),
     cx.env.DB.prepare("DELETE FROM push_targets WHERE device_id = ? AND user_id = ?").bind(device.id, cx.user!.id),
   ]);
 }
 
+/** Signing out is always allowed, also for the last manage device: the user can sign in again by email. */
 export const signOutThisDevice: Handler = async (cx) => {
-  await revokeClientDevice(cx, cx.device!);
+  await revokeClientDevice(cx, cx.device!, false);
   return NO_CONTENT;
 };
 

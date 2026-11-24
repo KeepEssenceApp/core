@@ -1,7 +1,7 @@
 // Reading: digests, the deep-read queue, deep-dive requests, notes, status, calendar, counts, usage.
 import { DAY, now } from "../clock";
 import { err } from "../errors";
-import { addDays, addMonths, daysInMonth, isDay, localDay, localParts } from "../time";
+import { addDays, addMonths, daysInMonth, localDay, localParts } from "../time";
 import { NO_CONTENT, ok, type AssistantRow, type Cx, type Handler, type UserRow } from "../types";
 import { decodeCursor, encodeCursor, iso, parseJson } from "../util";
 import { listAssistants } from "../services/accounts";
@@ -111,6 +111,7 @@ interface QueueJoined {
   assistant_id: string | null;
   entry: string | null;
   went_at: number | null;
+  went_to: string | null;
   fetched_at: number | null;
   claim_expires_at: number | null;
   claim_id: string | null;
@@ -134,6 +135,7 @@ function queueView(q: QueueJoined, user: UserRow, names: Map<string, string>) {
     deep_read: state,
     report: report ? { ...report, assistant: signature(names, q.assistant_id) } : null,
     went_at: iso(q.went_at),
+    went_to: q.went_to ? signature(names, q.went_to) : null,
     fetched_at: iso(q.fetched_at),
     entry: q.entry,
   };
@@ -176,8 +178,8 @@ export const startDeepDive: Handler = async (cx) => {
     throw err("conflict", "还没有可以深挖的助手：先接入一只，或在助手设置里选一只缺省的。", "There is no assistant to deep dive with yet: connect one, or choose a default in the assistant settings.");
   }
   const line = await recordDeepDive(cx.env, user, item, assistant.id);
-  const queue = await cx.env.DB.prepare("UPDATE deep_read_queue SET went_at = ? WHERE user_id = ? AND item_id = ? RETURNING entry, assistant_id")
-    .bind(now(), user.id, item.id)
+  const queue = await cx.env.DB.prepare("UPDATE deep_read_queue SET went_at = ?, went_to = ? WHERE user_id = ? AND item_id = ? RETURNING entry, assistant_id")
+    .bind(now(), assistant.id, user.id, item.id)
     .first<{ entry: string | null; assistant_id: string | null }>();
   // An entry exists only when this very assistant attached one to its deep-read report.
   const entry = queue && queue.assistant_id === assistant.id ? queue.entry : null;
@@ -381,5 +383,3 @@ export const getUsage: Handler = async (cx) => {
     })),
   });
 };
-
-export { isDay };

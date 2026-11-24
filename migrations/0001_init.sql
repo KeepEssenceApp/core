@@ -236,6 +236,7 @@ CREATE TABLE deep_read_queue (
   assistant_id TEXT,
   entry TEXT,
   went_at INTEGER,
+  went_to TEXT,
   fetched_at INTEGER,
   last_activity_at INTEGER NOT NULL,
   claim_id TEXT,

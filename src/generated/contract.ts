@@ -33,12 +33,13 @@ export const CONTRACT: Contract = {
   },
   "sharedRules": {
     "secret_like": {
-      "description": "Content that looks like a password or a credential. A client must ask the user before saving it, and must not silently drop it. A match on any pattern counts. Only text of at most `max_length_checked` characters after trimming is checked; longer text never counts. `regex` is written without inline flags so every language can compile it; `flags: i` means match without regard to case.\n",
+      "description": "Content that looks like a password or a credential. A client must ask the user before saving it, and must not silently drop it. A match on any pattern counts. Only text of at most `max_length_checked` characters after trimming is checked; longer text never counts, except for a pattern marked `any_length`, which is checked on text of any length. `regex` is written without inline flags so every language can compile it; `flags: i` means match without regard to case.\n",
       "max_length_checked": 200,
       "patterns": [
         {
           "name": "private_key_block",
-          "regex": "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+          "regex": "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+          "any_length": true
         },
         {
           "name": "known_credential_prefix",
@@ -135,6 +136,15 @@ export const CONTRACT: Contract = {
         "zh": "{n} 条处理好了，可以去看。",
         "en": "{n} items are ready."
       }
+    },
+    "push_payload": {
+      "description": "The JSON a device receives in a notification. `body` is the sentence to show. `count` is how many items it covers. `item_id` is set when it covers exactly one item (open that item); otherwise open the today view. `kind` is `analysis`, `deep_read` or `mixed`.\n",
+      "fields": [
+        "body",
+        "count",
+        "item_id",
+        "kind"
+      ]
     },
     "opening_line": {
       "description": "What a user sends to a chat assistant to start a deep dive. It carries no content; the assistant fetches it.",
