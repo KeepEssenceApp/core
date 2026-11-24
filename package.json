@@ -7,7 +7,7 @@
   "scripts": {
     "gen": "node scripts/gen-contract.mjs",
     "gen:vapid": "node scripts/gen-vapid.mjs",
-    "dev": "npm run gen && wrangler d1 migrations apply DB --local && wrangler dev --port 8791",
+    "dev": "npm run gen && wrangler d1 migrations apply DB --local && wrangler dev --port 8801",
     "deploy": "npm run gen && wrangler deploy",
     "typecheck": "npm run gen && tsc --noEmit",
     "test": "npm run gen && vitest run"

@@ -33,7 +33,7 @@ export const CONTRACT: Contract = {
   },
   "sharedRules": {
     "secret_like": {
-      "description": "Content that looks like a password or a credential. A client must ask the user before saving it, and must not silently drop it. A match on any pattern counts.\n",
+      "description": "Content that looks like a password or a credential. A client must ask the user before saving it, and must not silently drop it. A match on any pattern counts. Only text of at most `max_length_checked` characters after trimming is checked; longer text never counts. `regex` is written without inline flags so every language can compile it; `flags: i` means match without regard to case.\n",
       "max_length_checked": 200,
       "patterns": [
         {
@@ -46,11 +46,13 @@ export const CONTRACT: Contract = {
         },
         {
           "name": "bearer_or_basic_header",
-          "regex": "(?i)\\b(authorization|bearer|basic)[:= ]+[A-Za-z0-9._~+/=-]{16,}"
+          "regex": "\\b(authorization|bearer|basic)[:= ]+[A-Za-z0-9._~+/=-]{16,}",
+          "flags": "i"
         },
         {
           "name": "assignment_of_secret",
-          "regex": "(?i)\\b(pass(word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key)\\s*[:=]\\s*\\S{6,}"
+          "regex": "\\b(pass(word|wd)?|secret|api[_-]?key|access[_-]?key|private[_-]?key)\\s*[:=]\\s*\\S{6,}",
+          "flags": "i"
         },
         {
           "name": "single_dense_string",
@@ -76,6 +78,14 @@ export const CONTRACT: Contract = {
       "queued_offline": {
         "zh": "还没存入，排着队，联网后自动存入。",
         "en": "Not saved yet. Queued, and it will be saved when you are back online."
+      },
+      "queued_not_connected": {
+        "zh": "还没存入，排着队，接入后自动存入。",
+        "en": "Not saved yet. Queued, and it will be saved once this device is connected."
+      },
+      "declined": {
+        "zh": "没存入。",
+        "en": "Not saved."
       },
       "failed": {
         "zh": "没存入：{reason}",

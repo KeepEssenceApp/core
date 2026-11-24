@@ -111,7 +111,7 @@ export function errorResponse(e: unknown, lang: Lang): Response {
 
 async function readBody(op: ContractOperation, request: Request): Promise<Record<string, any>> {
   if (!op.bodyType) return {};
-  const text = await request.text();
+  const text = new TextDecoder().decode(await request.arrayBuffer());
   if (!text.trim()) {
     if (op.bodyRequired) throw err("bad_request", "缺少请求内容。", "The request body is missing.");
     return {};
@@ -175,8 +175,9 @@ async function run(op: ContractOperation, handler: Handler, env: Env, request: R
         if (!cx.idemKey) throw err("idempotency_key_required");
       }
     }
-    cx.body = await readBody(op, request);
-    if (op.body) assertValid(cx.body, op.body, op.operationId === "submitResult" ? "invalid_result" : "bad_request");
+    // The assistant endpoint reads its own body: JSON-RPC has its own error shape.
+    if (op.operationId !== "assistantEndpoint") cx.body = await readBody(op, request);
+    if (op.body && op.operationId !== "assistantEndpoint") assertValid(cx.body, op.body, op.operationId === "submitResult" ? "invalid_result" : "bad_request");
     return respond(await handler(cx));
   } catch (e) {
     return errorResponse(e, lang);

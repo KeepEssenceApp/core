@@ -28,7 +28,7 @@ function isLocal(host: string): boolean {
 function corsHeaders(env: Env, request: Request, path: string): Record<string, string> {
   const origin = request.headers.get("origin");
   if (!origin) return {};
-  const open = path.startsWith("/oauth/") || path.startsWith("/.well-known/") || path === "/mcp" || path.startsWith("/c/");
+  const open = path.startsWith("/v1/uploads/") || path.startsWith("/v1/downloads/") || path.startsWith("/oauth/") || path.startsWith("/.well-known/") || path === "/mcp" || path.startsWith("/c/");
   const listed = [env.APP_ORIGIN, ...(env.ALLOWED_ORIGINS ?? "").split(",")].map((o) => (o ?? "").trim()).filter(Boolean);
   let allowed = open || listed.includes(origin) || /^(chrome-extension|moz-extension|safari-web-extension):\/\//.test(origin);
   if (!allowed && env.ALLOW_HTTP === "1") {

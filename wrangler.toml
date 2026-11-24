@@ -31,7 +31,7 @@ bucket_name = "keepessence-core-files"
 
 [vars]
 # Where the web app lives (allow page, approve page). Also the browser origin allowed by CORS.
-APP_ORIGIN = "http://localhost:8791"
+APP_ORIGIN = "http://localhost:8801"
 # Model endpoint in the Anthropic Messages API format; the key is the secret LLM_API_KEY.
 LLM_BASE_URL = "https://api.anthropic.com"
 LLM_MODEL = "claude-haiku-5-5"

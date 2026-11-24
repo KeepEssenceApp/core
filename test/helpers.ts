@@ -146,7 +146,8 @@ export async function rpc(env: Env, token: string | null, method: string, params
 
 export async function tool(env: Env, token: string, name: string, args: Record<string, unknown> = {}): Promise<{ isError: boolean; data: any; status?: number }> {
   const r = await rpc(env, token, "tools/call", { name, arguments: args });
-  const result = r.json.result;
+  const result = r.json?.result;
+  if (!result) throw new Error(`tools/call ${name} failed: ${r.status} ${r.text}`);
   return { isError: result.isError, data: result.structuredContent, status: result._meta?.status };
 }
 
