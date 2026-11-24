@@ -11,8 +11,33 @@ export const TZ = "Asia/Shanghai";
 
 export type Outbound = (url: string, init?: RequestInit) => Promise<Response>;
 
+/** No test ever reaches the network: an outbound request that was not stubbed fails here. */
+const noNetwork: Outbound = async (url) => new Response("outbound request not stubbed: " + url, { status: 599 });
+
+/**
+ * The test environment. Everything a developer's local .dev.vars could set is fixed here, so the
+ * tests do not depend on it (and can never pick up a real model key).
+ */
 export function makeEnv(extra: Partial<Env> = {}): Env {
-  return { ...(baseEnv as unknown as Env), ...extra };
+  return {
+    ...(baseEnv as unknown as Env),
+    ALLOW_HTTP: "0",
+    APP_ORIGIN: "https://app.test",
+    PUBLIC_ORIGIN: undefined,
+    ALLOWED_ORIGINS: undefined,
+    ADMIN_SECRET: ADMIN,
+    SIGNING_KEY: "test-signing-key",
+    LLM_API_KEY: undefined,
+    LLM_BASE_URL: "https://model.test",
+    LLM_MODEL: "claude-haiku-5-5",
+    RESEND_API_KEY: undefined,
+    EMAIL_FROM: undefined,
+    VAPID_PRIVATE_KEY: undefined,
+    VAPID_PUBLIC_KEY: undefined,
+    WEB: undefined,
+    OUTBOUND: noNetwork,
+    ...extra,
+  };
 }
 
 export interface Reply {
