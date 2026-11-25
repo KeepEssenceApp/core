@@ -181,8 +181,12 @@ export async function analyseForUser(env: Env, userId: string, origin: string): 
       // that the user sees the truth and the model is not asked about it every minute for ever.
       const itemId = claim.work[i].ref;
       const attempts = await noteAnalysisFailure(env, actor, itemId);
-      const last = attempts >= ANALYSIS_MAX_ATTEMPTS;
-      console.warn(`analysis of ${itemId} failed (attempt ${attempts} of ${ANALYSIS_MAX_ATTEMPTS}): ${outcome.failure}${last ? "; handed in as unreadable" : ""}`);
+      // The model's side being down (5xx, 429, no answer) says nothing about the item: such
+      // failures get a far higher limit, so a short outage does not mark items unreadable.
+      const outage = /(^| )(5\d\d|429)$|^no reply within|^request failed/.test(outcome.failure);
+      const limit = outage ? ANALYSIS_MAX_ATTEMPTS * 20 : ANALYSIS_MAX_ATTEMPTS;
+      const last = attempts >= limit;
+      console.warn(`analysis of ${itemId} failed (attempt ${attempts} of ${limit}): ${outcome.failure}${last ? "; handed in as unreadable" : ""}`);
       if (last) done.push({ result: { kind: "analysis", item_id: itemId, unavailable: true, summary: COULD_NOT_READ[rules.lang as Lang] ?? COULD_NOT_READ.en }, usage: null });
     }
     let accepted = 0;
