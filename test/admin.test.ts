@@ -26,47 +26,16 @@ import {
   withHelper,
   type Outbound,
   type Session,
+  fillEmptyTables,
+  filledUser,
+  MARKER,
+  PNG,
+  saveImage,
+  sha,
+  tablesWithUserId,
 } from "./helpers";
 
 const admin = (env: any, method: string, path: string, body?: unknown) => call(env, method, path, { token: ADMIN, ...(body === undefined ? {} : { body }) });
-
-const PNG = (extra: number[]) => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...extra]);
-
-async function sha(bytes: Uint8Array): Promise<string> {
-  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/** Uploads a small picture and saves it as an item, so the file is referenced and stays. */
-async function saveImage(env: any, token: string, bytes: Uint8Array): Promise<string> {
-  const up = await call(env, "POST", "/v1/assets", { token, body: { sha256: await sha(bytes), bytes: bytes.byteLength, content_type: "image/png" } });
-  await call(env, "PUT", up.json.upload_url, { raw: bytes, headers: { "content-type": "image/png" } });
-  const done = await call(env, "POST", `/v1/assets/${up.json.asset_id}/complete`, { token });
-  if (done.status !== 204) throw new Error("upload failed " + done.text);
-  const saved = await call(env, "POST", "/v1/items", { token, body: { kind: "image", asset_id: up.json.asset_id }, idem: idem() });
-  if (saved.status !== 201) throw new Error("image save failed " + saved.text);
-  return up.json.asset_id;
-}
-
-const MARKER = "ZEBRAQUARTZ";
-
-/**
- * A user whose every kind of content carries MARKER: items (title and text), the analyses and the
- * daily digest the built-in assistants wrote from them, a note, and a queue entry.
- */
-async function filledUser(env: any, email = "ann@example.com"): Promise<{ user: Session; itemIds: string[] }> {
-  const user = await signIn(env, email);
-  const itemIds = [
-    await saveText(env, user.token, `${MARKER} green tea wants cooler water.`, `${MARKER} tea`),
-    await saveText(env, user.token, `Oolong sits in between. ${MARKER}`, `Oolong ${MARKER}`),
-  ];
-  await runMinute(env); // the built-in assistants triage and analyse
-  advance(9 * HOUR + MINUTE); // 21:01 in the user's time zone
-  await runMinute(env); // the daily digest
-  const note = await call(env, "POST", "/v1/notes", { token: user.token, body: { title: `${MARKER} note`, body: `What I learnt: ${MARKER}.`, item_id: itemIds[0] }, idem: idem() });
-  if (note.status !== 201) throw new Error("note failed " + note.text);
-  await call(env, "PUT", `/v1/deep-read-queue/${itemIds[1]}`, { token: user.token });
-  return { user, itemIds };
-}
 
 const builtinEnv = (calls: any[] = [], extra: Record<string, unknown> = {}) => makeEnv({ ...LLM, OUTBOUND: builtinModel(calls), ...extra });
 
@@ -556,35 +525,6 @@ describe("admin suspension", () => {
 });
 
 describe("admin account deletion", () => {
-  /** Every table that has a user_id column, found by asking each table — not by the list the core keeps. */
-  async function tablesWithUserId(env: any): Promise<string[]> {
-    const names = (await db(env, "SELECT name FROM sqlite_master WHERE type = 'table'")).map((r) => r.name as string);
-    const out: string[] = [];
-    for (const name of names) {
-      if (/^(sqlite_|_cf_|d1_)/i.test(name) || name === "users") continue;
-      try {
-        await db(env, `SELECT COUNT(*) AS n FROM "${name}" WHERE user_id = ?`, "nobody");
-        out.push(name);
-      } catch {
-        // no such column: not a table with user data
-      }
-    }
-    return out.sort();
-  }
-
-  /** Puts a row for the user into every user table that has none yet, built from the table's own columns. */
-  async function fillEmptyTables(env: any, tables: string[], userId: string): Promise<string[]> {
-    const filled: string[] = [];
-    for (const table of tables) {
-      if ((await db(env, `SELECT COUNT(*) AS n FROM "${table}" WHERE user_id = ?`, userId))[0].n > 0) continue;
-      const columns = await db(env, `PRAGMA table_info("${table}")`);
-      const values = columns.map((c: any) => (c.name === "user_id" ? userId : /INT/i.test(c.type) ? 1 : `fill-${userId}-${table}-${c.name}`));
-      await db(env, `INSERT INTO "${table}" (${columns.map((c: any) => `"${c.name}"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`, ...values);
-      filled.push(table);
-    }
-    return filled;
-  }
-
   it("deletion: the tables the core walks are exactly the tables of the schema that have a user_id column", async () => {
     const env = makeEnv();
     const found = await tablesWithUserId(env);

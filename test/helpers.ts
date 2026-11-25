@@ -196,7 +196,7 @@ export async function db(env: Env, sql: string, ...binds: unknown[]): Promise<an
 
 export { sha256Hex };
 
-import { advance, MINUTE } from "../src/clock";
+import { advance, HOUR, MINUTE } from "../src/clock";
 import { runMinute } from "../src/cron";
 
 /** Ann with a connected scheduled assistant that is the default for analysis, digest and deep read. */
@@ -276,3 +276,74 @@ export async function leap(env: Env, session: Session, ms: number): Promise<void
     await call(env, "GET", "/v1/devices/me", { token: session.token });
   }
 }
+
+// ---------------------------------------------------------------- a full account, and what is left of one
+// Shared by the operator's deletion (admin.test.ts) and the user's own (qa-25.test.ts).
+
+export const PNG = (extra: number[]) => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...extra]);
+
+export async function sha(bytes: Uint8Array): Promise<string> {
+  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Uploads a small picture and saves it as an item, so the file is referenced and stays. */
+export async function saveImage(env: any, token: string, bytes: Uint8Array): Promise<string> {
+  const up = await call(env, "POST", "/v1/assets", { token, body: { sha256: await sha(bytes), bytes: bytes.byteLength, content_type: "image/png" } });
+  await call(env, "PUT", up.json.upload_url, { raw: bytes, headers: { "content-type": "image/png" } });
+  const done = await call(env, "POST", `/v1/assets/${up.json.asset_id}/complete`, { token });
+  if (done.status !== 204) throw new Error("upload failed " + done.text);
+  const saved = await call(env, "POST", "/v1/items", { token, body: { kind: "image", asset_id: up.json.asset_id }, idem: idem() });
+  if (saved.status !== 201) throw new Error("image save failed " + saved.text);
+  return up.json.asset_id;
+}
+
+export const MARKER = "ZEBRAQUARTZ";
+
+/**
+ * A user whose every kind of content carries MARKER: items (title and text), the analyses and the
+ * daily digest the built-in assistants wrote from them, a note, and a queue entry.
+ */
+export async function filledUser(env: any, email = "ann@example.com"): Promise<{ user: Session; itemIds: string[] }> {
+  const user = await signIn(env, email);
+  const itemIds = [
+    await saveText(env, user.token, `${MARKER} green tea wants cooler water.`, `${MARKER} tea`),
+    await saveText(env, user.token, `Oolong sits in between. ${MARKER}`, `Oolong ${MARKER}`),
+  ];
+  await runMinute(env); // the built-in assistants triage and analyse
+  advance(9 * HOUR + MINUTE); // 21:01 in the user's time zone
+  await runMinute(env); // the daily digest
+  const note = await call(env, "POST", "/v1/notes", { token: user.token, body: { title: `${MARKER} note`, body: `What I learnt: ${MARKER}.`, item_id: itemIds[0] }, idem: idem() });
+  if (note.status !== 201) throw new Error("note failed " + note.text);
+  await call(env, "PUT", `/v1/deep-read-queue/${itemIds[1]}`, { token: user.token });
+  return { user, itemIds };
+}
+
+/** Every table that has a user_id column, found by asking each table — not by the list the core keeps. */
+export async function tablesWithUserId(env: any): Promise<string[]> {
+  const names = (await db(env, "SELECT name FROM sqlite_master WHERE type = 'table'")).map((r) => r.name as string);
+  const out: string[] = [];
+  for (const name of names) {
+    if (/^(sqlite_|_cf_|d1_)/i.test(name) || name === "users") continue;
+    try {
+      await db(env, `SELECT COUNT(*) AS n FROM "${name}" WHERE user_id = ?`, "nobody");
+      out.push(name);
+    } catch {
+      // no such column: not a table with user data
+    }
+  }
+  return out.sort();
+}
+
+/** Puts a row for the user into every user table that has none yet, built from the table's own columns. */
+export async function fillEmptyTables(env: any, tables: string[], userId: string): Promise<string[]> {
+  const filled: string[] = [];
+  for (const table of tables) {
+    if ((await db(env, `SELECT COUNT(*) AS n FROM "${table}" WHERE user_id = ?`, userId))[0].n > 0) continue;
+    const columns = await db(env, `PRAGMA table_info("${table}")`);
+    const values = columns.map((c: any) => (c.name === "user_id" ? userId : /INT/i.test(c.type) ? 1 : `fill-${userId}-${table}-${c.name}`));
+    await db(env, `INSERT INTO "${table}" (${columns.map((c: any) => `"${c.name}"`).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`, ...values);
+    filled.push(table);
+  }
+  return filled;
+}
+
