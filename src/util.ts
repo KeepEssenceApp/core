@@ -107,14 +107,15 @@ export function decodeCursor(cursor: string | undefined | null): number {
   }
 }
 
-/** First sentence of a text, for a title. Never a raw address. */
+/** First sentence of a text, for a title. Never a raw address. A sentence longer than `max` ends with "…". */
 export function firstSentence(text: string, max = 80): string {
   const clean = text.replace(/\s+/g, " ").trim();
   if (!clean) return "";
   const m = clean.match(/^.*?[。！？!?]|^.*?\.(?=\s|$)/);
   let s = (m ? m[0] : clean).trim();
   if (/^https?:\/\//i.test(s)) s = "";
-  return truncate(s, max);
+  // Too long for a title: stop at a word or a clause and say so with an ellipsis (QA #19).
+  return shorten(s, max);
 }
 
 export function looksLikeUrl(text: string): boolean {

@@ -5,7 +5,7 @@ import { LIMITS, num, type Env } from "../env";
 import type { Lang } from "../errors";
 import { localDay } from "../time";
 import type { AssistantRow, ItemRow, UserRow } from "../types";
-import { firstSentence, iso, looksLikeUrl, parseJson, truncate } from "../util";
+import { firstSentence, iso, looksLikeUrl, parseJson, shorten, truncate } from "../util";
 import { assetText, isTextType, type AssetRow } from "./assets";
 import { fetchPage, siteOf } from "./fetchpage";
 
@@ -33,7 +33,7 @@ export function urlKey(raw: string): string {
 /** A client-given title is used unless it is empty or just an address. */
 export function cleanTitle(title: string | undefined): string {
   const t = (title ?? "").replace(/\s+/g, " ").trim();
-  return t && !looksLikeUrl(t) ? truncate(t, 300) : "";
+  return t && !looksLikeUrl(t) ? shorten(t, 300) : "";
 }
 
 export function countStatement(
