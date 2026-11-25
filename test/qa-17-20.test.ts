@@ -128,7 +128,7 @@ describe("QA #20: uploaded files are read, and a failing analysis stops after th
       const request = JSON.parse(String(init?.body));
       if (request.system.startsWith("You analyse")) {
         analysisCalls++;
-        return Response.json({ type: "error", error: { type: "invalid_request_error", message: "boom" } }, { status: 400 });
+        return Response.json({ type: "error", error: { type: "invalid_request_error", message: "boom" } }, { status: 422 });
       }
       return model(url, init);
     };
