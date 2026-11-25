@@ -81,12 +81,12 @@ export async function dispatchForUser(env: Env, userId: string): Promise<number>
 
 const ANALYSIS_SYSTEM = (lang: Lang) =>
   `You analyse one saved item for its owner. Write in ${LANG_NAME[lang]}. Answer with JSON only, with exactly these fields:\n` +
-  `{"summary": one sentence, at most ${LIMITS.analysis_summary_max_chars} characters, saying what the item is about;\n` +
-  ` "key_fact": one line that fits the kind of content (article: author and length; video: duration; repository: language and stars; screenshot: the main thing in it; post: author and platform; text: word count; file: format and pages);\n` +
-  ` "points": up to ${LIMITS.analysis_points_max} short sentences with the substance;\n` +
+  `{"summary": one complete sentence saying what the item is about: at most 60 characters in Chinese or 25 words in a language written with spaces (never more than ${LIMITS.analysis_summary_max_chars} characters);\n` +
+  ` "key_fact": one line, at most ${LIMITS.analysis_key_fact_max_chars} characters, that fits the kind of content (article: author and length; video: duration; repository: language and stars; screenshot: the main thing in it; post: author and platform; text: word count; file: format and pages);\n` +
+  ` "points": up to ${LIMITS.analysis_points_max} complete sentences with the substance, each at most ${LIMITS.analysis_point_max_chars} characters;\n` +
   ` "verdict": "worth_deep_dive" | "good_to_know" | "skippable";\n` +
   ` "related_hint": optional, one sentence naming an earlier item, digest or note of the owner (from "related") that this connects to. Leave it out if nothing connects.}\n` +
-  `Judge by the owner's rules if they say what matters. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.`;
+  `Judge by the owner's rules if they say what matters. Every field must be a finished thought that fits its limit: write shorter rather than be cut off. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.`;
 
 type Analysed = { result: Record<string, unknown>; usage: { input: number; output: number; model: string } | null } | { failure: string };
 
@@ -140,11 +140,11 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     item_id: itemId,
     summary,
     verdict: x.verdict,
-    points: (Array.isArray(x.points) ? x.points : []).map((p: unknown) => str(p, 120)).filter(Boolean).slice(0, LIMITS.analysis_points_max),
+    points: (Array.isArray(x.points) ? x.points : []).map((p: unknown) => str(p, LIMITS.analysis_point_max_chars)).filter(Boolean).slice(0, LIMITS.analysis_points_max),
   };
-  const keyFact = str(x.key_fact, 120);
+  const keyFact = str(x.key_fact, LIMITS.analysis_key_fact_max_chars);
   if (keyFact) result.key_fact = keyFact;
-  const hint = str(x.related_hint, 120);
+  const hint = str(x.related_hint, 200);
   if (hint) result.related_hint = hint;
   return { result, usage };
 }

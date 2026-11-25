@@ -57,6 +57,8 @@ export const LIMITS = CONTRACT.limits as {
   page_fetch_timeout_seconds: number;
   queue_idle_days: number;
   analysis_summary_max_chars: number;
+  analysis_key_fact_max_chars: number;
+  analysis_point_max_chars: number;
   analysis_points_max: number;
   notify_wait_seconds: number;
   notify_max_wait_seconds: number;

@@ -25,7 +25,9 @@ export const CONTRACT: Contract = {
     "triage_default_after_minutes": 10,
     "page_fetch_timeout_seconds": 8,
     "queue_idle_days": 7,
-    "analysis_summary_max_chars": 60,
+    "analysis_summary_max_chars": 160,
+    "analysis_key_fact_max_chars": 200,
+    "analysis_point_max_chars": 300,
     "analysis_points_max": 3,
     "digest_hour": 21,
     "notify_wait_seconds": 120,
@@ -1944,12 +1946,12 @@ export const CONTRACT: Contract = {
                     },
                     "summary": {
                       "type": "string",
-                      "maxLength": 60,
-                      "description": "One sentence."
+                      "maxLength": 160,
+                      "description": "One sentence. Aim for 60 Chinese characters or 25 English words; the limit is the hard stop."
                     },
                     "key_fact": {
                       "type": "string",
-                      "maxLength": 120,
+                      "maxLength": 200,
                       "description": "One line that depends on the kind of content."
                     },
                     "points": {
@@ -1957,7 +1959,8 @@ export const CONTRACT: Contract = {
                       "maxItems": 3,
                       "items": {
                         "type": "string",
-                        "maxLength": 120
+                        "maxLength": 300,
+                        "description": "One sentence each."
                       }
                     },
                     "verdict": {
@@ -1970,7 +1973,7 @@ export const CONTRACT: Contract = {
                     },
                     "related_hint": {
                       "type": "string",
-                      "maxLength": 120
+                      "maxLength": 200
                     }
                   }
                 },
@@ -2776,12 +2779,12 @@ export const CONTRACT: Contract = {
                     },
                     "summary": {
                       "type": "string",
-                      "maxLength": 60,
-                      "description": "One sentence."
+                      "maxLength": 160,
+                      "description": "One sentence. Aim for 60 Chinese characters or 25 English words; the limit is the hard stop."
                     },
                     "key_fact": {
                       "type": "string",
-                      "maxLength": 120,
+                      "maxLength": 200,
                       "description": "One line that depends on the kind of content."
                     },
                     "points": {
@@ -2789,7 +2792,8 @@ export const CONTRACT: Contract = {
                       "maxItems": 3,
                       "items": {
                         "type": "string",
-                        "maxLength": 120
+                        "maxLength": 300,
+                        "description": "One sentence each."
                       }
                     },
                     "verdict": {
@@ -2802,7 +2806,7 @@ export const CONTRACT: Contract = {
                     },
                     "related_hint": {
                       "type": "string",
-                      "maxLength": 120
+                      "maxLength": 200
                     }
                   }
                 },

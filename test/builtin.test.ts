@@ -85,7 +85,7 @@ describe("K11 built-in worker", () => {
   it("K11 worker: an answer that does not fit the four fields is not handed in; the item is tried again", async () => {
     let good = false;
     const calls: any[] = [];
-    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { analysis: (input) => (good ? { summary: "s".repeat(90), key_fact: "k", points: ["1", "2", "3", "4", "5"], verdict: "good_to_know" } : "I would rather write an essay about " + input.title) }) });
+    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { analysis: (input) => (good ? { summary: "s".repeat(190), key_fact: "k", points: ["1", "2", "3", "4", "5"], verdict: "good_to_know" } : "I would rather write an essay about " + input.title) }) });
     const ann = await signIn(env);
     const id = await saveText(env, ann.token, "A difficult text.");
     await runMinute(env);
@@ -95,7 +95,7 @@ describe("K11 built-in worker", () => {
     await runMinute(env);
     const a = (await item(env, ann.token, id)).analysis;
     // Too long a summary and too many points are cut to the limits before handing in.
-    expect([...a.summary]).toHaveLength(60);
+    expect([...a.summary]).toHaveLength(160);
     expect(a.points).toEqual(["1", "2", "3"]);
   });
 

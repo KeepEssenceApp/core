@@ -149,7 +149,7 @@ describe("K20 assistant endpoint", () => {
     expect(rules.data).toMatchObject({ rules: "", expiry_options: [7, 30, 90, 365], lang: "en", timezone: "Asia/Shanghai", default_analysis_assistant: "Helper" });
     const claimed = await tool(env, helper.access, "claim_work", { kind: "analysis", limit: 5 });
     expect(claimed.data.work).toEqual([{ ref: id, title: "Analyse me through the tools." }]);
-    const bad = await tool(env, helper.access, "submit_result", { id: claimed.data.claim_id, idempotency_key: idem(), results: [analysis(id, { summary: "x".repeat(61) })] });
+    const bad = await tool(env, helper.access, "submit_result", { id: claimed.data.claim_id, idempotency_key: idem(), results: [analysis(id, { summary: "x".repeat(161) })] });
     expect(bad).toMatchObject({ isError: true, status: 400 });
     expect(bad.data.error.code).toBe("invalid_result");
     expect((await tool(env, helper.access, "renew_claim", { id: claimed.data.claim_id })).data.claim_id).toBe(claimed.data.claim_id);

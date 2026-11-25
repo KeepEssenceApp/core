@@ -177,13 +177,13 @@ describe("K10 analysis fields", () => {
     const [id] = await seed(env, ann, 1);
     const c = await claim(env, helper.access, "analysis");
     const cases: [Record<string, unknown>, string][] = [
-      [{ summary: "x".repeat(61) }, "at most 60 characters"],
-      [{ summary: "茶".repeat(61) }, "at most 60 characters"],
+      [{ summary: "x".repeat(161) }, "at most 160 characters"],
+      [{ summary: "茶".repeat(161) }, "at most 160 characters"],
       [{ points: ["one", "two", "three", "four"] }, "at most 3 entries"],
       [{ verdict: "brilliant" }, "worth_deep_dive, good_to_know, skippable"],
       [{ verdict: undefined }, "verdict is required"],
       [{ summary: undefined }, "summary is required"],
-      [{ points: ["x".repeat(121)] }, "at most 120"],
+      [{ points: ["x".repeat(301)] }, "at most 300"],
       [{ tags: ["tea"] }, "tags"],
       [{ body: "free text instead of fields" }, "body"],
       [{ kind: "essay" }, "kind"],
