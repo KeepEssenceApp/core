@@ -89,7 +89,14 @@ const ANALYSIS_SYSTEM = (lang: Lang) =>
   ` "points": up to ${LIMITS.analysis_points_max} complete sentences with the substance, each at most ${LIMITS.analysis_point_max_chars} characters;\n` +
   ` "verdict": "worth_deep_dive" | "good_to_know" | "skippable";\n` +
   ` "related_hint": optional, one sentence naming an earlier item, digest or note of the owner (from "related") that this connects to. Leave it out if nothing connects.}\n` +
-  `Judge by the owner's rules if they say what matters. Every field must be a finished thought that fits its limit: write shorter rather than be cut off. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.`;
+  `Judge by the owner's rules if they say what matters. When "length" is given and the key fact mentions how long the text is, use exactly those numbers and do not count yourself. Every field must be a finished thought that fits its limit: write shorter rather than be cut off. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.`;
+
+/** The length of a text as a reader would count it: words for text written with spaces, characters for Chinese, Japanese and Korean. */
+export function textLength(text: string): { words: number; cjk_characters: number } {
+  const cjk = text.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g)?.length ?? 0;
+  const words = text.replace(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g, " ").split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
+  return { words, cjk_characters: cjk };
+}
 
 type Analysed = { result: Record<string, unknown>; usage: { input: number; output: number; model: string } | null } | { failure: string };
 
@@ -116,6 +123,8 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     saved_at: ctx.item.saved_at,
     rules: rules.rules,
     related: ctx.related,
+    // Counted here, not by the model: the same text must always get the same number.
+    length: ctx.item.body ? textLength(ctx.item.body) : null,
     content: truncate(ctx.item.body ?? "", 24_000),
   };
   let content: string | ContentBlock[] = JSON.stringify(facts);
