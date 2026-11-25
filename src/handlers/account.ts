@@ -167,7 +167,7 @@ async function* exportParts(cx: Cx): AsyncGenerator<string> {
     }
     const rows = items.results as ExportItemRow[];
     const out = rows.map((r) => {
-      const view = itemView(r, names, cx.lang);
+      const view = itemView(r, names, cx.lang, (cx.user as UserRow).timezone);
       if (r.asset_id && r.f_type !== null) fileNames.set(r.asset_id, view.title);
       const setBy = (kind: string): "user" | "triage" | "default" => {
         const by = (tagsOf.get(r.id) ?? []).find((t) => t.kind === kind)?.set_by;

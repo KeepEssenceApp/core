@@ -100,3 +100,24 @@ describe("QA #7 retention", () => {
     expect(await item(env, ann.token, id)).toMatchObject({ pinned: false, expiry_days: 30, days_left: 30 });
   });
 });
+
+describe("QA #83: days left are counted on the calendar", () => {
+  it("reads the full term on the day of saving and one less the next day, whatever the hour", async () => {
+    const { advance, HOUR } = await import("../src/clock");
+    const env = makeEnv();
+    const ann = await signIn(env);
+    const id = await saveText(env, ann.token, "Kept for a week.");
+    expect((await call(env, "PATCH", `/v1/items/${id}`, { token: ann.token, body: { expiry_days: 7 } })).json.days_left).toBe(7);
+    // T0 is 12:00 in Shanghai. Eleven hours on it is still the same day there.
+    advance(11 * HOUR);
+    expect((await call(env, "GET", `/v1/items/${id}`, { token: ann.token })).json.days_left).toBe(7);
+    // Two more hours: the next day, 23 hours short of... still 6 days and 11 hours to go, and it reads 6.
+    advance(2 * HOUR);
+    expect((await call(env, "GET", `/v1/items/${id}`, { token: ann.token })).json.days_left).toBe(6);
+    advance(5 * 24 * HOUR);
+    expect((await call(env, "GET", `/v1/items/${id}`, { token: ann.token })).json.days_left).toBe(1);
+    // The day it ends on: 0, until the hour it goes.
+    advance(24 * HOUR);
+    expect((await call(env, "GET", `/v1/items/${id}`, { token: ann.token })).json.days_left).toBe(0);
+  });
+});

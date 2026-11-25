@@ -158,7 +158,7 @@ export const listItems: Handler = async (cx) => {
     .all<ItemJoined>();
   const n = await names(cx);
   return ok({
-    items: rows.results.slice(0, limit).map((r) => itemView(r, n, cx.lang)),
+    items: rows.results.slice(0, limit).map((r) => itemView(r, n, cx.lang, cx.user!.timezone)),
     next_cursor: rows.results.length > limit ? encodeCursor(offset + limit) : null,
   });
 };
@@ -174,7 +174,7 @@ export const searchItems: Handler = async (cx) => {
     .bind(cx.user!.id, like, like, like, cx.query.limit ?? 20)
     .all<ItemJoined>();
   const n = await names(cx);
-  return ok({ items: rows.results.map((r) => itemView(r, n, cx.lang)) });
+  return ok({ items: rows.results.map((r) => itemView(r, n, cx.lang, cx.user!.timezone)) });
 };
 
 async function detail(cx: Cx, id: string) {
@@ -191,7 +191,7 @@ async function detail(cx: Cx, id: string) {
     return by === "user" ? "user" : by === "triage" ? "triage" : "default";
   };
   return {
-    ...itemView(item, n, cx.lang),
+    ...itemView(item, n, cx.lang, cx.user!.timezone),
     retention_set_by: item.pinned ? "user" : setBy("expiry"),
     assistant_set_by: setBy("assistant"),
     body: item.body,

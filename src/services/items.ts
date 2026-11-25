@@ -103,9 +103,18 @@ export function endsAt(row: Pick<ItemRow, "pinned" | "expires_at" | "hard_expire
   return Math.min(soft, row.hard_expires_at);
 }
 
-export function daysLeft(row: Pick<ItemRow, "pinned" | "expires_at" | "hard_expires_at" | "queue_holds">, t = now()): number | null {
+/**
+ * Days until the item goes, counted on the calendar in the user's time zone: the days between
+ * today's date and the date it ends on. Saved today for 7 days reads 7; tomorrow it reads 6,
+ * whatever the hour (QA #83). 0 means it ends today. Without a time zone: whole days, rounded up.
+ */
+export function daysLeft(row: Pick<ItemRow, "pinned" | "expires_at" | "hard_expires_at" | "queue_holds">, t = now(), tz?: string): number | null {
   const end = endsAt(row, t);
-  return end === null ? null : Math.max(0, Math.ceil((end - t) / DAY));
+  if (end === null) return null;
+  if (end <= t) return 0;
+  if (!tz) return Math.ceil((end - t) / DAY);
+  const utc = (day: string) => Date.parse(`${day}T00:00:00Z`);
+  return Math.max(0, Math.round((utc(localDay(end, tz)) - utc(localDay(t, tz))) / DAY));
 }
 
 export function analysisView(row: ItemJoined, names: Names, lang: Lang) {
@@ -126,7 +135,7 @@ export function analysisView(row: ItemJoined, names: Names, lang: Lang) {
   };
 }
 
-export function itemView(row: ItemJoined, names: Names, lang: Lang) {
+export function itemView(row: ItemJoined, names: Names, lang: Lang, tz?: string) {
   return {
     id: row.id,
     kind: row.kind,
@@ -137,7 +146,7 @@ export function itemView(row: ItemJoined, names: Names, lang: Lang) {
     stage: row.analysed_at ? "analysed" : row.triaged_at ? "triaged" : "saved",
     content_unavailable: row.content_unavailable === 1,
     dispatch_to: row.dispatch_to ? { id: row.dispatch_to, name: names.get(row.dispatch_to) ?? "" } : null,
-    days_left: daysLeft(row),
+    days_left: daysLeft(row, now(), tz),
     pinned: row.pinned === 1,
     signal: row.signal,
     in_queue: row.q_item_id !== null,
