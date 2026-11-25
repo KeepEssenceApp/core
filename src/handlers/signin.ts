@@ -35,13 +35,21 @@ export async function maySignIn(env: Env, email: string): Promise<boolean> {
   return row !== null && row.suspended_at === null;
 }
 
-/** A fresh 6-digit code for the address. It replaces any earlier one. */
-export async function mintLoginCode(env: Env, email: string): Promise<{ code: string; expiresAt: number }> {
+/**
+ * A fresh 6-digit code for the address. It replaces any earlier one. `lang` is the language of
+ * the sign-in page that asked; a code minted without one (by the operator) keeps the language
+ * of the request it replaces, so a new account still starts in the language its owner saw.
+ */
+export async function mintLoginCode(env: Env, email: string, lang: Lang | null = null): Promise<{ code: string; expiresAt: number }> {
   const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
   const code = String(n).padStart(6, "0");
   const expiresAt = now() + LIMITS.login_code_minutes * MINUTE;
-  await env.DB.prepare("INSERT OR REPLACE INTO login_codes (email, code_hash, attempts, expires_at, created_at) VALUES (?, ?, 0, ?, ?)")
-    .bind(email, await codeHash(email, code), expiresAt, now())
+  await env.DB.prepare(
+    `INSERT INTO login_codes (email, code_hash, attempts, expires_at, created_at, lang) VALUES (?1, ?2, 0, ?3, ?4, ?5)
+     ON CONFLICT (email) DO UPDATE SET code_hash = excluded.code_hash, attempts = 0, expires_at = excluded.expires_at, created_at = excluded.created_at,
+       lang = COALESCE(excluded.lang, CASE WHEN login_codes.expires_at > ?4 THEN login_codes.lang END)`,
+  )
+    .bind(email, await codeHash(email, code), expiresAt, now(), lang)
     .run();
   return { code, expiresAt };
 }
@@ -104,7 +112,7 @@ export const requestLoginCode: Handler = async (cx) => {
       allowed = false;
     }
     if (allowed) {
-      const { code } = await mintLoginCode(cx.env, email);
+      const { code } = await mintLoginCode(cx.env, email, cx.body.lang ?? null);
       const send = mailCode(cx.env, email, code, cx.body.lang ?? cx.lang);
       if (cx.exec) cx.exec.waitUntil(send);
       else await send;
@@ -120,7 +128,7 @@ export const signIn: Handler = async (cx) => {
   const wrong = err("unauthorized", "验证码不对，或已经失效。", "The code is wrong or no longer valid.");
   const row = await env.DB.prepare("SELECT * FROM login_codes WHERE email = ?")
     .bind(email)
-    .first<{ code_hash: string; attempts: number; expires_at: number }>();
+    .first<{ code_hash: string; attempts: number; expires_at: number; lang: Lang | null }>();
   if (!row || row.expires_at <= now() || row.attempts >= LIMITS.login_code_max_attempts || !(await maySignIn(env, email))) throw wrong;
   if (!(await safeEqual(row.code_hash, await codeHash(email, cx.body.code)))) {
     await env.DB.prepare("UPDATE login_codes SET attempts = attempts + 1 WHERE email = ?").bind(email).run();
@@ -130,7 +138,10 @@ export const signIn: Handler = async (cx) => {
   const used = await env.DB.prepare("DELETE FROM login_codes WHERE email = ? AND code_hash = ?").bind(email, row.code_hash).run();
   if (used.meta.changes === 0) throw wrong;
   let user = await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(email).first<UserRow>();
-  if (!user) user = await createUser(env, email, validTimezone(cx.body.timezone) ? cx.body.timezone : "UTC", cx.lang);
+  // A new account writes in the language of the sign-in page its owner saw (QA #18): the one sent
+  // with the code request; this request's own language only when that one is not known.
+  const lang: Lang = row.lang === "zh" || row.lang === "en" ? row.lang : cx.lang;
+  if (!user) user = await createUser(env, email, validTimezone(cx.body.timezone) ? cx.body.timezone : "UTC", lang);
   // Whoever proves the email address owns the account: the device gets the manage tier.
   const { device, credential } = await createDevice(env, user.id, cx.body.device_name.trim(), cx.body.client, "manage", true);
   return ok({ credential, device: deviceView(device, device.id, false), user: userView(user) }, 201);
