@@ -158,10 +158,10 @@ async function* exportParts(cx: Cx): AsyncGenerator<string> {
          LEFT JOIN assets f ON f.id = i.asset_id AND f.user_id = i.user_id AND f.status = 'stored'
          WHERE i.user_id = ?1 AND i.archived_at IS NULL AND (i.created_at, i.id) > (?2, ?3) ORDER BY i.created_at, i.id LIMIT ?4`,
       ).bind(user.id, at, id, ITEM_PAGE),
-      env.DB.prepare(`SELECT item_id, kind, value FROM item_tags WHERE user_id = ?1 AND item_id IN (${page}) ORDER BY item_id, kind`).bind(user.id, at, id, ITEM_PAGE),
+      env.DB.prepare(`SELECT item_id, kind, value, set_by FROM item_tags WHERE user_id = ?1 AND item_id IN (${page}) ORDER BY item_id, kind`).bind(user.id, at, id, ITEM_PAGE),
     ]);
-    const tagsOf = new Map<string, { kind: string; value: string }[]>();
-    for (const t of tags.results as { item_id: string; kind: string; value: string }[]) {
+    const tagsOf = new Map<string, { kind: string; value: string; set_by: string }[]>();
+    for (const t of tags.results as { item_id: string; kind: string; value: string; set_by: string }[]) {
       if (!tagsOf.has(t.item_id)) tagsOf.set(t.item_id, []);
       tagsOf.get(t.item_id)!.push(t);
     }
@@ -169,8 +169,14 @@ async function* exportParts(cx: Cx): AsyncGenerator<string> {
     const out = rows.map((r) => {
       const view = itemView(r, names, cx.lang);
       if (r.asset_id && r.f_type !== null) fileNames.set(r.asset_id, view.title);
+      const setBy = (kind: string): "user" | "triage" | "default" => {
+        const by = (tagsOf.get(r.id) ?? []).find((t) => t.kind === kind)?.set_by;
+        return by === "user" ? "user" : by === "triage" ? "triage" : "default";
+      };
       return {
         ...view,
+        retention_set_by: r.pinned ? "user" : setBy("expiry"),
+        assistant_set_by: setBy("assistant"),
         body: r.body,
         asset_id: r.asset_id,
         // As on the item itself: a kept item has no end date, so no expiry tag is listed.

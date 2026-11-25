@@ -174,17 +174,24 @@ export const searchItems: Handler = async (cx) => {
 async function detail(cx: Cx, id: string) {
   const [row, tags] = await cx.env.DB.batch<any>([
     cx.env.DB.prepare(`SELECT ${ITEM_SELECT}, i.body ${ITEM_FROM} WHERE i.user_id = ? AND i.id = ? AND i.archived_at IS NULL`).bind(cx.user!.id, id),
-    cx.env.DB.prepare("SELECT kind, value FROM item_tags WHERE user_id = ? AND item_id = ? ORDER BY kind").bind(cx.user!.id, id),
+    cx.env.DB.prepare("SELECT kind, value, set_by FROM item_tags WHERE user_id = ? AND item_id = ? ORDER BY kind").bind(cx.user!.id, id),
   ]);
   const item = row.results[0] as (ItemJoined & { body: string | null }) | undefined;
   if (!item) throw err("not_found");
   const n = await names(cx);
+  // Who decided each value: the user, the sorting step, or nobody yet (the default stands).
+  const setBy = (kind: string): "user" | "triage" | "default" => {
+    const by = (tags.results as { kind: string; set_by: string }[]).find((t) => t.kind === kind)?.set_by;
+    return by === "user" ? "user" : by === "triage" ? "triage" : "default";
+  };
   return {
     ...itemView(item, n, cx.lang),
+    retention_set_by: item.pinned ? "user" : setBy("expiry"),
+    assistant_set_by: setBy("assistant"),
     body: item.body,
     asset_id: item.asset_id,
     // A kept item has no end date, so its expiry tag does not apply and is not listed (QA #7).
-    tags: (tags.results as { kind: string; value: string }[])
+    tags: (tags.results as { kind: string; value: string; set_by: string }[])
       .filter((t) => !(item.pinned && t.kind === "expiry"))
       .map((t) => `${t.kind}:${t.kind === "assistant" ? (n.get(t.value) ?? t.value) : t.value}`),
     expiry_days: item.pinned ? null : item.expiry_days,
