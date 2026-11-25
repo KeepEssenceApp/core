@@ -73,12 +73,15 @@ describe("QA #25 export", () => {
     expect(digest.assistant.name).toBe("Built-in assistant");
 
     // Notes, oldest first, each with its sources and where it came from.
-    expect(doc.notes.map((n: any) => n.title)).toEqual([`${MARKER} note`, "Tea, in short"]);
-    expect(doc.notes[0].body).toBe(`What I learnt: ${MARKER}.`);
-    expect(doc.notes[0].origin).toMatchObject({ item_id: itemIds[0], item_title: `${MARKER} tea`, digest_day: "2026-11-24" });
-    expect(doc.notes[0].assistant.submitted_by_user).toBe(true);
-    expect(doc.notes[1].sources).toEqual([{ title: "A tea page", url: "https://tea.example/green" }]);
-    expect(doc.notes[1].assistant.name).toBe("Helper");
+    // Both notes were made at the same instant of the test clock, so their order is by id: look them up by title.
+    expect(doc.notes.map((n: any) => n.title).sort()).toEqual(["Tea, in short", `${MARKER} note`].sort());
+    const pasted = doc.notes.find((n: any) => n.title === `${MARKER} note`);
+    const byHelper = doc.notes.find((n: any) => n.title === "Tea, in short");
+    expect(pasted.body).toBe(`What I learnt: ${MARKER}.`);
+    expect(pasted.origin).toMatchObject({ item_id: itemIds[0], item_title: `${MARKER} tea`, digest_day: "2026-11-24" });
+    expect(pasted.assistant.submitted_by_user).toBe(true);
+    expect(byHelper.sources).toEqual([{ title: "A tea page", url: "https://tea.example/green" }]);
+    expect(byHelper.assistant.name).toBe("Helper");
 
     // Items that exist: the text, the analysis, the tags, how long they are kept.
     expect(doc.items).toHaveLength(3);
