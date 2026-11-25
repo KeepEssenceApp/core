@@ -6,7 +6,8 @@ needs `Authorization: Bearer <ADMIN_SECRET>` (compared in constant time), and an
 `ADMIN_SECRET` is not set. Errors use the usual body `{ "error": { "code", "message" } }`.
 
 **No content.** No route returns a title, a body, an address or any text of an item, analysis,
-daily digest or note. Only counts, times, and the names of devices and assistants.
+daily digest or note. Only counts, times, and the names of devices and assistants. The one list
+that holds words a user typed is feedback, which the user addressed to the operator.
 
 Times are ISO 8601 UTC strings. Lists take `limit` (default 50, max 200) and an opaque `cursor`.
 A `limit` above 200 is read as 200; a `limit` that is not a positive integer, or a `cursor` the
@@ -120,6 +121,25 @@ active one answers 200 and records nothing.
 Built-in assistants only; `top_users` holds at most 20, by total tokens. `days` is one entry per
 UTC day, oldest first, ending today, with zeros for days without usage. 400 when `days` is not an
 integer from 1 to 90.
+
+## Feedback
+
+`GET /admin/feedback?cursor=&limit=` →
+
+```json
+{ "forwarding": null,
+  "feedback": [{ "id": "fb_…", "at": "…", "user_id": "usr_…", "email": "…", "client": "web", "where": "web",
+                 "doing": "", "wrong": "…", "wish": "", "issue_url": null, "forward_error": null }],
+  "next_cursor": null }
+```
+
+What users sent with `POST /v1/feedback`, newest first. `forwarding` is the repository
+(`owner/name`) each entry is also filed in as an issue, or `null` when `FEEDBACK_GITHUB_REPO` and
+`FEEDBACK_GITHUB_TOKEN` are not both set. `issue_url` is the issue once it exists; until then
+`forward_error` says why the last attempt failed. An entry is tried when it arrives and then by the
+minute job, five times at most. The issue carries the sender's email, so the repository should be
+private. Deleting an account deletes its feedback here; an issue already filed stays where it is.
+`config.feedback_forwarding` in the overview says whether forwarding is on.
 
 ## Audit log
 

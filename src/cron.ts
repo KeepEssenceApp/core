@@ -1,6 +1,7 @@
 // Scheduled work. Every minute: page fetch fallback, the core's triage defaults, the built-in
 // assistants, notifications. Every hour: expiry and cleanup. Batches are small so that one run
 // stays light.
+import { forwardPending } from "./handlers/feedback";
 import { DAY, MINUTE, now } from "./clock";
 import { analyseForUser, digestForUser, dispatchForUser, modelConfigured } from "./builtin";
 import { LIMITS, num, type Env } from "./env";
@@ -109,6 +110,7 @@ export async function runMinute(env: Env): Promise<void> {
   await step("triage-defaults", () => triageDefaults(env));
   await runBuiltIns(env, origin);
   await step("notify", () => sendDueNotifications(env));
+  await step("feedback", () => forwardPending(env));
   await step("record", () => recordRun(env, CRON_KEYS.minute));
 }
 

@@ -43,7 +43,7 @@ describe("admin guard", () => {
   it("admin guard: every admin route refuses a missing or wrong secret with 401, and answers 404 when no secret is configured", async () => {
     const env = makeEnv();
     const off = makeEnv({ ADMIN_SECRET: undefined });
-    expect(ADMIN_ROUTES.length).toBe(15);
+    expect(ADMIN_ROUTES.length).toBe(16);
     for (const route of ADMIN_ROUTES) {
       const path = route.path.replace("{id}", "usr_x").replace("{device_id}", "dev_x");
       const body = route.method === "GET" ? undefined : { email: "a@b.co" };
@@ -199,10 +199,10 @@ describe("admin overview", () => {
 
   it("admin overview: the config flags say what is configured without showing any secret", async () => {
     const bare = await admin(makeEnv({ LLM_MODEL: "" }), "GET", "/admin/overview");
-    expect(bare.json.config).toEqual({ model: "claude-haiku-5-5", model_configured: false, mail_configured: false, push_configured: false, mail_last: null, version: "0.0.0-development" });
+    expect(bare.json.config).toEqual({ model: "claude-haiku-5-5", model_configured: false, mail_configured: false, feedback_forwarding: false, push_configured: false, mail_last: null, version: "0.0.0-development" });
     const secrets = { LLM_API_KEY: "secret-model-key", RESEND_API_KEY: "secret-mail-key", EMAIL_FROM: "Sign in <login@example.com>", VAPID_PRIVATE_KEY: "secret-vapid-private", VAPID_PUBLIC_KEY: "vapid-public" };
     const full = await admin(makeEnv({ ...secrets, LLM_MODEL: "some-model", CORE_VERSION: "1.4.0" }), "GET", "/admin/overview");
-    expect(full.json.config).toEqual({ model: "some-model", model_configured: true, mail_configured: true, push_configured: true, mail_last: null, version: "1.4.0" });
+    expect(full.json.config).toEqual({ model: "some-model", model_configured: true, mail_configured: true, feedback_forwarding: false, push_configured: true, mail_last: null, version: "1.4.0" });
     for (const value of [...Object.values(secrets), ADMIN, "test-signing-key"]) expect(full.text).not.toContain(value);
     // Half of a pair is not "configured".
     const half = await admin(makeEnv({ RESEND_API_KEY: "k", VAPID_PUBLIC_KEY: "p" }), "GET", "/admin/overview");
@@ -641,7 +641,9 @@ describe("admin: no content", () => {
     keep(await admin(env, "POST", `/admin/users/${ann.userId}/restore`), 200);
     keep(await admin(env, "POST", "/admin/audit", { action: "portal.sign_in", target: "operator", detail: "from the portal" }), 201);
 
-    const gets = ADMIN_ROUTES.filter((r) => r.method === "GET").map((r) => r.path.replace("{id}", ann.userId));
+    // Feedback is left out on purpose: it is what a user wrote to the operator, and it is the one
+    // list that shows a user's own words. It holds nothing of an item, analysis, digest or note.
+    const gets = ADMIN_ROUTES.filter((r) => r.method === "GET" && r.path !== "/admin/feedback").map((r) => r.path.replace("{id}", ann.userId));
     expect(gets.sort()).toEqual(["/admin/audit", "/admin/invites", "/admin/overview", "/admin/usage", "/admin/users", `/admin/users/${ann.userId}`]);
     for (const path of [...gets, "/admin/users?q=ann&status=active&limit=200", "/admin/usage?days=90", "/admin/audit?limit=200"]) {
       keep(await admin(env, "GET", path), 200);

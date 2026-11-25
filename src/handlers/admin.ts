@@ -5,6 +5,7 @@
 // - No content: no title, body, address or text of an item, analysis, daily digest or note ever
 //   leaves through these routes. Only counts, times, and the names of devices and assistants.
 // - Few queries: every list is one aggregating statement or one batch, never a loop over users.
+import { forwardingConfigured, type FeedbackRow } from "./feedback";
 import pkg from "../../package.json";
 import { DAY, now } from "../clock";
 import { CRON_KEYS } from "../cron";
@@ -170,6 +171,42 @@ const listAudit: AdminHandler = async (env, request) => {
   });
 };
 
+// ---------------------------------------------------------------- feedback
+
+/**
+ * What users wrote to the operator. This is the one list here that holds text a user typed:
+ * they addressed it to the operator. It never holds anything of an item, analysis, digest or note.
+ */
+const listFeedback: AdminHandler = async (env, request) => {
+  const url = new URL(request.url);
+  const limit = limitOf(url);
+  const cursor = url.searchParams.get("cursor");
+  let before = Number.MAX_SAFE_INTEGER;
+  if (cursor) {
+    before = Number(decodeCursor(cursor));
+    if (!Number.isInteger(before) || before < 1) throw badCursor();
+  }
+  const rows = await env.DB.prepare("SELECT rowid AS seq, * FROM feedback WHERE rowid < ? ORDER BY rowid DESC LIMIT ?").bind(before, limit + 1).all<FeedbackRow>();
+  const page = rows.results.slice(0, limit);
+  return json({
+    forwarding: forwardingConfigured(env) ? env.FEEDBACK_GITHUB_REPO : null,
+    feedback: page.map((r) => ({
+      id: r.id,
+      at: iso(r.created_at),
+      user_id: r.user_id,
+      email: r.email,
+      client: r.client,
+      where: r.place,
+      doing: r.doing,
+      wrong: r.wrong,
+      wish: r.wish,
+      issue_url: r.issue_url,
+      forward_error: r.issue_url ? null : r.forward_error,
+    })),
+    next_cursor: rows.results.length > limit ? encodeCursor(String(page[page.length - 1].seq)) : null,
+  });
+};
+
 /** Something that looks like one of the core's credentials (device, access, refresh, one-time code). */
 const CREDENTIAL = /\bk[dacr]_[A-Za-z0-9_-]{16,}/;
 
@@ -265,6 +302,7 @@ const getOverview: AdminHandler = async (env) => {
       model: env.LLM_MODEL || DEFAULT_MODEL,
       model_configured: Boolean(env.LLM_API_KEY),
       mail_configured: mailConfigured(env),
+      feedback_forwarding: forwardingConfigured(env),
       mail_last: mailLast,
       push_configured: Boolean(env.VAPID_PRIVATE_KEY && env.VAPID_PUBLIC_KEY),
       version: env.CORE_VERSION || pkg.version,
@@ -678,6 +716,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "DELETE", path: "/admin/users/{id}/devices/{device_id}", why: "operator: revoke one client device", handler: revokeUserDevice },
   { method: "DELETE", path: "/admin/users/{id}", why: "operator: delete an account and all its data", handler: deleteUser },
   { method: "GET", path: "/admin/usage", why: "operator: what the built-in assistants used", handler: getUsage },
+  { method: "GET", path: "/admin/feedback", why: "operator: what users wrote to the operator", handler: listFeedback },
   { method: "GET", path: "/admin/audit", why: "operator: the audit log", handler: listAudit },
   { method: "POST", path: "/admin/audit", why: "operator: an audit entry for something the portal did itself", handler: addAudit },
 ];

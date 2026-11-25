@@ -32,6 +32,10 @@ export interface Env {
   VAPID_PRIVATE_KEY?: string;
   VAPID_PUBLIC_KEY?: string;
   RESEND_API_KEY?: string;
+  /** Optional: feedback is also filed as an issue in this GitHub repository ("owner/name"). */
+  FEEDBACK_GITHUB_REPO?: string;
+  /** A token that may create issues in FEEDBACK_GITHUB_REPO, and nothing more. */
+  FEEDBACK_GITHUB_TOKEN?: string;
   EMAIL_FROM?: string;
   /** Optional: the platform's own mail sending (a `send_email` binding). Used before RESEND_API_KEY. */
   EMAIL?: { send(message: { to: string; from: string; subject: string; text: string; html?: string }): Promise<unknown> };
@@ -63,6 +67,7 @@ export const LIMITS = CONTRACT.limits as {
   notify_wait_seconds: number;
   notify_max_wait_seconds: number;
   text_max_chars: number;
+  feedback_per_user_per_day: number;
 };
 
 export function num(value: string | undefined, fallback: number): number {

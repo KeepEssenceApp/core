@@ -67,4 +67,7 @@ ARCHIVE_RETENTION_DAYS = ""       # empty: keep archived items
 #   VAPID_PRIVATE_KEY  Web Push key pair, from `npm run gen:vapid`.
 #   VAPID_PUBLIC_KEY
 #   RESEND_API_KEY     optional; with EMAIL_FROM, sign-in codes are emailed.
+#   FEEDBACK_GITHUB_TOKEN  optional; with FEEDBACK_GITHUB_REPO ("owner/name", a plain variable), feedback sent
+#                      from inside the app is also filed there as an issue. Give it a token that can only create
+#                      issues in that one repository. Without it feedback is kept in D1 and read in the portal.
 #   EMAIL_FROM         optional; for example "Sign in <login@example.com>".

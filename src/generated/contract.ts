@@ -32,7 +32,8 @@ export const CONTRACT: Contract = {
     "digest_hour": 21,
     "notify_wait_seconds": 120,
     "notify_max_wait_seconds": 600,
-    "text_max_chars": 200000
+    "text_max_chars": 200000,
+    "feedback_per_user_per_day": 20
   },
   "sharedRules": {
     "secret_like": {
@@ -1611,6 +1612,57 @@ export const CONTRACT: Contract = {
       "bodyType": null,
       "bodyRequired": false,
       "body": null
+    },
+    {
+      "operationId": "sendFeedback",
+      "method": "POST",
+      "path": "/v1/feedback",
+      "auth": "device",
+      "tier": "save",
+      "tool": null,
+      "readOnly": false,
+      "idempotent": false,
+      "params": [],
+      "bodyType": "application/json",
+      "bodyRequired": true,
+      "body": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "wrong"
+        ],
+        "properties": {
+          "where": {
+            "type": "string",
+            "enum": [
+              "web",
+              "ios",
+              "android",
+              "extension",
+              "assistant",
+              "other"
+            ],
+            "description": "Where it happened. Defaults to the kind of the calling device."
+          },
+          "doing": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "What the user was doing."
+          },
+          "wrong": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "What went wrong",
+            "or what is missing.": null
+          },
+          "wish": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "How the user would like it to be."
+          }
+        }
+      }
     },
     {
       "operationId": "deleteAccount",
