@@ -1653,8 +1653,7 @@ export const CONTRACT: Contract = {
             "type": "string",
             "minLength": 1,
             "maxLength": 4000,
-            "description": "What went wrong",
-            "or what is missing.": null
+            "description": "What went wrong, or what is missing."
           },
           "wish": {
             "type": "string",
