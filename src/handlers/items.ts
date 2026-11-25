@@ -3,7 +3,7 @@ import { DAY, MINUTE, now } from "../clock";
 import { LIMITS, num, type Env } from "../env";
 import { err } from "../errors";
 import { NO_CONTENT, ok, type Cx, type Handler, type ItemRow, type Result } from "../types";
-import { decodeCursor, encodeCursor, firstSentence, iso, newId, parseJson, truncate } from "../util";
+import { decodeCursor, encodeCursor, firstSentence, iso, newId, parseJson, sha256Hex, truncate } from "../util";
 import { listAssistants } from "../services/accounts";
 import { assetText, deleteIfUnreferenced, isTextType, refStatement, type AssetRow } from "../services/assets";
 import { idempotent, rateLimit } from "../services/guard";
@@ -58,6 +58,12 @@ async function save(cx: Cx): Promise<Result> {
   }
   let text = (b.text ?? "").trim();
   if (b.kind === "text" && !text) throw err("bad_request", "存入文字需要 text。", "Saving text needs `text`.");
+  if (b.kind === "text") {
+    // The same text saved again while the first one still exists is swallowed, like a repeated link (rule B3).
+    key = `text:${await sha256Hex(text.replace(/\s+/g, " "))}`;
+    const existing = await env.DB.prepare("SELECT id FROM items WHERE user_id = ? AND url_key = ? AND archived_at IS NULL").bind(user.id, key).first<{ id: string }>();
+    if (existing) return ok(saveResult(cx, "duplicate", existing.id, "duplicate"));
+  }
   let asset: AssetRow | null = null;
   let imageStored: boolean | undefined;
   if (b.kind === "image" || b.kind === "file") {

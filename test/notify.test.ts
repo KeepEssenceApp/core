@@ -219,7 +219,7 @@ describe("K18 notifications", () => {
     expect(await db(gone.env, "SELECT device_id FROM push_targets")).toEqual([]);
 
     const flaky = await setup((_, n) => (n === 1 ? 503 : 201));
-    await saveText(flaky.env, flaky.ann.token, "A thought.");
+    await saveText(flaky.env, flaky.ann.token, "Another thought.");
     await runMinute(flaky.env);
     await later(flaky.env, 3 * MINUTE);
     expect(flaky.pushes).toHaveLength(2);

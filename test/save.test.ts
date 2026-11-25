@@ -76,7 +76,7 @@ describe("K5 saving", () => {
     expect(await db(env, "SELECT id FROM items")).toHaveLength(1);
     // After 7 days the key is forgotten.
     advance(7 * DAY + 1000);
-    const later = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "text", text: "One." }, idem: key });
+    const later = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "text", text: "One, later." }, idem: key });
     expect(later.json.item_id).not.toBe(first.json.item_id);
   });
 
