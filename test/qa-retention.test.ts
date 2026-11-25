@@ -43,14 +43,18 @@ describe("QA #7 retention", () => {
     expect(expiryTags(back)).toEqual(["expiry:90"]);
   });
 
-  it("QA #7: days on an item that is not kept still count from when it was saved", async () => {
+  it("QA #7: days the user chooses count from the moment they are chosen, also on an older item", async () => {
     const env = makeEnv();
     const ann = await signIn(env);
     const id = await saveText(env, ann.token, "Saved two days ago.");
     advance(2 * DAY);
     const patched = await call(env, "PATCH", `/v1/items/${id}`, { token: ann.token, body: { expiry_days: 90 } });
-    expect(patched.json).toMatchObject({ pinned: false, expiry_days: 90, days_left: 88 });
-    expect(patched.json.expires_at).toBe(new Date(T0 + 90 * DAY).toISOString());
+    expect(patched.json).toMatchObject({ pinned: false, expiry_days: 90, days_left: 90 });
+    expect(patched.json.expires_at).toBe(new Date(T0 + 92 * DAY).toISOString());
+    // Seven days on a ten-day-old item must not delete it within the hour.
+    advance(8 * DAY);
+    const short = await call(env, "PATCH", `/v1/items/${id}`, { token: ann.token, body: { expiry_days: 7 } });
+    expect(short.json).toMatchObject({ expiry_days: 7, days_left: 7 });
   });
 
   it("QA #7: setting only the assistant before triage keeps the retention; triage cannot change it", async () => {

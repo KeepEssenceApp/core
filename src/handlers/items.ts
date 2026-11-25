@@ -236,7 +236,14 @@ export const updateItem: Handler = async (cx) => {
       );
     } else {
       statements.push(
-        cx.env.DB.prepare("UPDATE items SET expiry_days = ?, expires_at = ? WHERE id = ? AND user_id = ?").bind(days, item.created_at + days * DAY, item.id, cx.user!.id),
+        cx.env.DB.prepare("UPDATE items SET expiry_days = ?, expires_at = ? WHERE id = ? AND user_id = ?").bind(
+          days,
+          // Counted from now, not from when it was saved: choosing "7 days" on an older item
+          // must not delete it within the hour.
+          Math.min(now() + days * DAY, item.created_at + LIMITS.item_expiry_max_days * DAY),
+          item.id,
+          cx.user!.id,
+        ),
       );
     }
   }
