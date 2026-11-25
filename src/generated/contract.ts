@@ -1940,7 +1940,7 @@ export const CONTRACT: Contract = {
                     },
                     "unavailable": {
                       "type": "boolean",
-                      "description": "True when the content could not be fetched. Then no points and no verdict."
+                      "description": "True when the content could not be fetched or could not be read. Then no points and no verdict; `summary` may say which."
                     },
                     "summary": {
                       "type": "string",
@@ -2772,7 +2772,7 @@ export const CONTRACT: Contract = {
                     },
                     "unavailable": {
                       "type": "boolean",
-                      "description": "True when the content could not be fetched. Then no points and no verdict."
+                      "description": "True when the content could not be fetched or could not be read. Then no points and no verdict; `summary` may say which."
                     },
                     "summary": {
                       "type": "string",
