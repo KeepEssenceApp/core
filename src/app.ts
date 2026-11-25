@@ -6,6 +6,7 @@ import type { ContractOperation } from "./contract-types";
 import { LIMITS, type Env } from "./env";
 import { ApiError, err, pickLang, type Lang } from "./errors";
 import { handleDownload, handleUpload, completeUpload, getAsset, requestUpload } from "./handlers/assets";
+import * as account from "./handlers/account";
 import { ASSISTANT_HANDLERS } from "./handlers/assistant";
 import * as devices from "./handlers/devices";
 import * as items from "./handlers/items";
@@ -66,6 +67,8 @@ export const HANDLERS: Record<string, Handler> = {
   getSettings: settings.getSettings,
   updateSettings: settings.updateSettings,
   rotateCalendarImage: settings.rotateCalendarImage,
+  exportData: account.exportData,
+  deleteAccount: account.deleteOwnAccount,
   listAssistants: settings.listAssistantsHandler,
   updateAssistant: settings.updateAssistant,
   revokeAssistant: settings.revokeAssistantHandler,

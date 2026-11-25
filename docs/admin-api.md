@@ -132,8 +132,10 @@ integer from 1 to 90.
   refused with 400.
 
 Actions recorded by the core: `invite.add`, `invite.remove`, `login_code.mint`, `user.suspend`,
-`user.restore`, `user.sign_out`, `user.device_revoke`, `user.delete`. `target` is an email or a
+`user.restore`, `user.sign_out`, `user.device_revoke`, `user.delete`, `user.delete_self`. `target` is an email or a
 user id; `detail` never holds a sign-in code or a credential. For the `invite.*` and
 `login_code.mint` entries `target` is the email; for the `user.*` entries `target` is the user id
 and `detail` starts with the account's email, so the entry still says who it was after a deletion.
+`user.delete_self` is the one exception: a user deleted their own account (`DELETE /v1/account`,
+through the same deletion as the operator's), and the entry holds the user id and an empty `detail`.
 Only actions that changed something are recorded.

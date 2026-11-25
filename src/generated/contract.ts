@@ -1599,6 +1599,47 @@ export const CONTRACT: Contract = {
       "body": null
     },
     {
+      "operationId": "exportData",
+      "method": "GET",
+      "path": "/v1/export",
+      "auth": "device",
+      "tier": "manage",
+      "tool": null,
+      "readOnly": false,
+      "idempotent": false,
+      "params": [],
+      "bodyType": null,
+      "bodyRequired": false,
+      "body": null
+    },
+    {
+      "operationId": "deleteAccount",
+      "method": "DELETE",
+      "path": "/v1/account",
+      "auth": "device",
+      "tier": "manage",
+      "tool": null,
+      "readOnly": false,
+      "idempotent": false,
+      "params": [],
+      "bodyType": "application/json",
+      "bodyRequired": true,
+      "body": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "confirm_email"
+        ],
+        "properties": {
+          "confirm_email": {
+            "type": "string",
+            "maxLength": 320,
+            "description": "The email of the account. Compared without regard to case or surrounding spaces."
+          }
+        }
+      }
+    },
+    {
       "operationId": "listAssistants",
       "method": "GET",
       "path": "/v1/assistants",

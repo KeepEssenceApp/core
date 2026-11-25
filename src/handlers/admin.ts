@@ -123,7 +123,8 @@ type AuditAction =
   | "user.restore"
   | "user.sign_out"
   | "user.device_revoke"
-  | "user.delete";
+  | "user.delete"
+  | "user.delete_self";
 
 /** One audit entry written by the core. `detail` is built here from names and counts only: never a code or a credential. */
 function auditStatement(env: Env, action: AuditAction, target: string, detail = ""): D1PreparedStatement {
@@ -586,8 +587,10 @@ export async function userTables(env: Env): Promise<string[]> {
  * 4. one last batch removes whatever is left, the account itself, its invitation and its codes,
  *    and writes the audit entry.
  * Until step 4 the account still exists (suspended), so the same request can simply be sent again.
+ * The one way an account is deleted: the operator's route below and the user's own
+ * `DELETE /v1/account` (handlers/account.ts) both end here; `by` only chooses the audit entry.
  */
-export async function deleteAccount(env: Env, user: { id: string; email: string }): Promise<void> {
+export async function deleteAccount(env: Env, user: { id: string; email: string }, by: "operator" | "user" = "operator"): Promise<void> {
   await env.DB.prepare("UPDATE users SET suspended_at = COALESCE(suspended_at, ?) WHERE id = ?").bind(now(), user.id).run();
   const tables = await userTables(env);
   for (let round = 0; round < DELETE_ROUNDS_MAX; round++) {
@@ -607,7 +610,8 @@ export async function deleteAccount(env: Env, user: { id: string; email: string 
     env.DB.prepare("DELETE FROM login_codes WHERE email = ?").bind(user.email),
     env.DB.prepare("DELETE FROM invites WHERE email = ?").bind(user.email),
     env.DB.prepare("DELETE FROM users WHERE id = ?").bind(user.id),
-    auditStatement(env, "user.delete", user.id, user.email),
+    // The operator's entry says who it was. The user's own deletion leaves the id and nothing else.
+    by === "user" ? auditStatement(env, "user.delete_self", user.id) : auditStatement(env, "user.delete", user.id, user.email),
   ]);
 }
 

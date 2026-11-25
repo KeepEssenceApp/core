@@ -16,6 +16,8 @@ function settingsView(user: UserRow, origin: string, manage: boolean) {
     notify: user.notify === 1,
     timezone: user.timezone,
     lang: user.lang,
+    // The account's email, for the manage tier only: the web asks for it before deleting the account.
+    ...(manage ? { email: user.email } : {}),
     roles: { analysis: user.role_analysis, digest: user.role_digest, deep_read: user.role_deep_read, deep_dive: user.role_deep_dive },
     calendar_image: {
       enabled: user.calendar_enabled === 1,
