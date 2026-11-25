@@ -144,10 +144,22 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     content = [block, { type: "text", text: JSON.stringify(facts) }];
   }
   let why = "no reply";
-  const reply = await callModel(env, { timeoutMs: 25_000, maxTokens: 2000, system: ANALYSIS_SYSTEM(rules.lang as Lang), content, onFailure: (reason) => (why = reason) });
+  const ask = () => callModel(env, { timeoutMs: 25_000, maxTokens: 2000, system: ANALYSIS_SYSTEM(rules.lang as Lang), content, onFailure: (reason) => (why = reason) });
+  let reply = await ask();
   if (!reply) return { failure: why };
-  const usage = { input: reply.inputTokens, output: reply.outputTokens, model: reply.model };
-  const x = extractJson(reply.text) as any;
+  let usage = { input: reply.inputTokens, output: reply.outputTokens, model: reply.model };
+  let x = extractJson(reply.text) as any;
+  // An analysis without a single key point is asked for once more (QA #69). The second answer is
+  // taken as it is: an item is never called unreadable for lacking key points.
+  if (x && typeof x === "object" && x.unavailable !== true && !(Array.isArray(x.points) && x.points.some((p: unknown) => typeof p === "string" && p.trim()))) {
+    const again = await ask();
+    const y = again ? (extractJson(again.text) as any) : null;
+    if (again && y && typeof y === "object" && y.unavailable !== true && Array.isArray(y.points) && y.points.some((p: unknown) => typeof p === "string" && p.trim())) {
+      usage = { input: usage.input + again.inputTokens, output: usage.output + again.outputTokens, model: again.model };
+      reply = again;
+      x = y;
+    }
+  }
   if (!x || typeof x !== "object") return { failure: "the reply is not JSON" };
   if (x.unavailable === true) return unavailable(itemId, usage);
   const summary = str(x.summary, LIMITS.analysis_summary_max_chars);

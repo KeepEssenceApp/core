@@ -99,6 +99,27 @@ describe("K11 built-in worker", () => {
     expect(a.points).toEqual(["1", "2", "3"]);
   });
 
+  it("QA #69: an analysis without key points is asked for once more; a second one without them is still handed in", async () => {
+    let asked = 0;
+    let points: string[][] = [[], ["The one point."]];
+    const calls: any[] = [];
+    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { analysis: () => ({ summary: "A short note.", key_fact: "Text: 3 words.", points: points[Math.min(asked++, points.length - 1)], verdict: "skippable" }) }) });
+    const ann = await signIn(env);
+    const first = await saveText(env, ann.token, "A short note.");
+    await runMinute(env);
+    expect((await item(env, ann.token, first)).analysis.points).toEqual(["The one point."]);
+    expect(asked).toBe(2);
+    // The model never gives one: the item is analysed all the same, not called unreadable.
+    asked = 0;
+    points = [[]];
+    const second = await saveText(env, ann.token, "Another short note.");
+    await runMinute(env);
+    const a = (await item(env, ann.token, second)).analysis;
+    expect(a.unavailable).toBeFalsy();
+    expect(a.summary).toBe("A short note.");
+    expect(asked).toBe(2);
+  });
+
   it("K11 worker: content that could not be fetched is reported as such, without asking the model", async () => {
     const calls: any[] = [];
     const model = builtinModel(calls);
