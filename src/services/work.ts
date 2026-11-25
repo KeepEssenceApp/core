@@ -10,7 +10,7 @@ import { iso, newId, parseJson, truncate } from "../util";
 import { getUser, listAssistants } from "./accounts";
 import { signedDownloadUrl } from "./assets";
 import { coveredItems, coversOf, digestDay, digestDue, type DigestRow } from "./digests";
-import { countStatement, displayTitle, liveItem, maxExpiryDays, namesOf, OPENING_CHARS, sharedText, signature } from "./items";
+import { countStatement, displayTitle, fileOfItem, liveItem, maxExpiryDays, namesOf, OPENING_CHARS, sharedText, signature } from "./items";
 import { notifyEventStatement } from "./notify";
 
 export const WORK_KINDS: WorkKind[] = ["triage", "analysis", "digest", "deep_read"];
@@ -231,6 +231,20 @@ export async function releaseClaim(env: Env, actor: AssistantActor, claimId: str
     ),
     env.DB.prepare("UPDATE claims SET status = 'released' WHERE id = ? AND user_id = ? AND status = 'active'").bind(claim.id, actor.userId),
   ]);
+}
+
+/** A built-in assistant tries an item at most this often; then it says the content could not be read (QA #20). */
+export const ANALYSIS_MAX_ATTEMPTS = 3;
+
+/** One more failed attempt to analyse the item. Returns how many there are now. */
+export async function noteAnalysisFailure(env: Env, actor: AssistantActor, itemId: string): Promise<number> {
+  requireStep(actor, "analysis");
+  const row = await env.DB.prepare(
+    "UPDATE items SET analysis_attempts = analysis_attempts + 1 WHERE id = ? AND user_id = ? AND dispatch_to = ? AND analysed_at IS NULL RETURNING analysis_attempts",
+  )
+    .bind(itemId, actor.userId, actor.assistantId)
+    .first<{ analysis_attempts: number }>();
+  return row?.analysis_attempts ?? 0;
 }
 
 // ---------------------------------------------------------------- triage tags
@@ -628,6 +642,8 @@ export async function getContext(env: Env, actor: AssistantActor, itemId: string
     throw err("forbidden", "这一条不归这只助手精读。", "This item is not addressed to this assistant for a deep read.");
   }
   const names = namesOf(await listAssistants(env, user.id, true));
+  // A text file's content is the body; an older item gets it now. Images and PDFs are handed out as an address.
+  const file = await fileOfItem(env, item);
   const analysis = await env.DB.prepare("SELECT * FROM analyses WHERE item_id = ? AND user_id = ?").bind(item.id, user.id).first<any>();
   if (queue && (purpose === "deep_read" || purpose === "deep_dive")) {
     const t = now();
@@ -645,6 +661,7 @@ export async function getContext(env: Env, actor: AssistantActor, itemId: string
       body: item.body,
       content_unavailable: item.content_unavailable === 1,
       asset_url: item.asset_id ? await signedDownloadUrl(env, origin, user.id, item.asset_id) : null,
+      asset_type: file.type,
       saved_at: iso(item.created_at),
     },
     analysis: analysisOf(analysis, names, user.lang),

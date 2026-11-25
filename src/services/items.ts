@@ -1,11 +1,12 @@
 // Items: saving helpers, the views the reading clients get, counts, and the page fetch result.
 import { CONTRACT } from "../generated/contract";
 import { DAY, now } from "../clock";
-import { LIMITS, type Env } from "../env";
+import { LIMITS, num, type Env } from "../env";
 import type { Lang } from "../errors";
 import { localDay } from "../time";
 import type { AssistantRow, ItemRow, UserRow } from "../types";
 import { firstSentence, iso, looksLikeUrl, parseJson, truncate } from "../util";
+import { assetText, isTextType, type AssetRow } from "./assets";
 import { fetchPage, siteOf } from "./fetchpage";
 
 export const OPENING_CHARS = 500;
@@ -176,6 +177,33 @@ export async function fetchItemContent(env: Env, item: Pick<ItemRow, "id" | "use
   )
     .bind(title, keepTitle ? "client" : "fetch", page.site, body, truncate(body, OPENING_CHARS), item.id, item.user_id)
     .run();
+}
+
+/** The longest text the core stores for one item (fetched pages and text files alike). */
+export function bodyMaxChars(env: Env): number {
+  return num(env.BODY_MAX_CHARS, 100000);
+}
+
+/**
+ * The type of the item's file. A text file's content is the item's body: it is read when the
+ * item is saved; an item saved before the core did that gets it here, once (QA #20). `item` is
+ * updated in place.
+ */
+export async function fileOfItem(env: Env, item: ItemRow): Promise<{ type: string | null }> {
+  if (!item.asset_id) return { type: null };
+  const asset = await env.DB.prepare("SELECT * FROM assets WHERE id = ? AND user_id = ? AND status = 'stored'").bind(item.asset_id, item.user_id).first<AssetRow>();
+  if (!asset) return { type: null };
+  if (!item.body && isTextType(asset.content_type)) {
+    const text = await assetText(env, asset, bodyMaxChars(env));
+    if (text) {
+      item.body = text;
+      item.opening = truncate(text, OPENING_CHARS);
+      await env.DB.prepare("UPDATE items SET body = ?, opening = ? WHERE id = ? AND user_id = ? AND (body IS NULL OR body = '')")
+        .bind(item.body, item.opening, item.id, item.user_id)
+        .run();
+    }
+  }
+  return { type: asset.content_type };
 }
 
 export function defaultSite(url: string | undefined | null): string | null {

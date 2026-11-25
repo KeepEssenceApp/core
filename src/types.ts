@@ -79,6 +79,8 @@ export interface ItemRow {
   content_unavailable: number;
   fetch_state: string;
   fetch_attempts: number;
+  /** How often the built-in assistant failed to analyse it (QA #20). */
+  analysis_attempts: number;
   pinned: number;
   expiry_days: number;
   expires_at: number;

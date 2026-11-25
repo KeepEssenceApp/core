@@ -2,7 +2,7 @@
 // SIGNING_KEY (HMAC-SHA-256); an upload address is locked to its byte count and type.
 import { HOUR, MINUTE, now } from "../clock";
 import { signingKey, type Env } from "../env";
-import { hmacHex, safeEqual } from "../util";
+import { hmacHex, safeEqual, truncate } from "../util";
 
 export const UPLOAD_MINUTES = 10;
 export const DOWNLOAD_MINUTES = 5;
@@ -49,6 +49,23 @@ export async function verifyDownload(env: Env, userId: string, assetId: string, 
   const e = Number(exp);
   if (!sig || !Number.isFinite(e) || e <= now()) return false;
   return safeEqual(sig, await hmacHex(signingKey(env), `dl|${userId}|${assetId}|${e}`));
+}
+
+/** File types the core reads itself: their text becomes the item's body. */
+export function isTextType(type: string | null | undefined): boolean {
+  return type === "text/plain" || type === "text/markdown";
+}
+
+/** Bytes of a text file as text: UTF-8, a byte-order mark dropped, invalid bytes replaced, never throws. */
+export function decodeText(bytes: ArrayBuffer | Uint8Array, maxChars: number): string {
+  const text = new TextDecoder("utf-8", { fatal: false, ignoreBOM: false }).decode(bytes);
+  return truncate(text.replace(/\u0000/g, "").replace(/\r\n?/g, "\n").trim(), maxChars);
+}
+
+/** The text of a stored text file, at most `maxChars` characters; null when the file is not there. */
+export async function assetText(env: Env, asset: Pick<AssetRow, "r2_key">, maxChars: number): Promise<string | null> {
+  const object = await env.FILES.get(asset.r2_key);
+  return object ? decodeText(await object.arrayBuffer(), maxChars) : null;
 }
 
 function startsWith(bytes: Uint8Array, ...sig: number[]): boolean {

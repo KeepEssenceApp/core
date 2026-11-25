@@ -7,7 +7,7 @@ import type { Lang } from "./errors";
 import { builtinActor, getUser } from "./services/accounts";
 import { callModel, extractJson, modelConfigured, type ContentBlock } from "./services/model";
 import { digestDue } from "./services/digests";
-import { capLeft, claimWork, getContext, getDigestContext, getRules, releaseClaim, submitResults, type UsageInput } from "./services/work";
+import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, getContext, getDigestContext, getRules, noteAnalysisFailure, releaseClaim, submitResults, type UsageInput } from "./services/work";
 import type { AssistantActor, UserRow } from "./types";
 import { shorten, truncate } from "./util";
 
@@ -88,9 +88,24 @@ const ANALYSIS_SYSTEM = (lang: Lang) =>
   ` "related_hint": optional, one sentence naming an earlier item, digest or note of the owner (from "related") that this connects to. Leave it out if nothing connects.}\n` +
   `Judge by the owner's rules if they say what matters. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.`;
 
-async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules: Awaited<ReturnType<typeof getRules>>, origin: string) {
+type Analysed = { result: Record<string, unknown>; usage: { input: number; output: number; model: string } | null } | { failure: string };
+
+const unavailable = (itemId: string, usage: { input: number; output: number; model: string } | null = null): Analysed => ({
+  result: { kind: "analysis", item_id: itemId, unavailable: true },
+  usage,
+});
+
+/** What the model is shown of a file with no text: an image or a PDF, fetched by the model from the core's signed https address. */
+export function fileBlock(type: string | null | undefined, url: string | null | undefined): ContentBlock | null {
+  if (!url || !/^https:\/\//.test(url)) return null;
+  if (type?.startsWith("image/")) return { type: "image", source: { type: "url", url } };
+  if (type === "application/pdf") return { type: "document", source: { type: "url", url } };
+  return null;
+}
+
+async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules: Awaited<ReturnType<typeof getRules>>, origin: string): Promise<Analysed> {
   const ctx = await getContext(env, actor, itemId, "analysis", origin);
-  if (ctx.item.content_unavailable) return { result: { kind: "analysis", item_id: itemId, unavailable: true }, usage: null };
+  if (ctx.item.content_unavailable) return unavailable(itemId);
   const facts = {
     kind: ctx.item.kind,
     title: ctx.item.title,
@@ -101,21 +116,25 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     content: truncate(ctx.item.body ?? "", 24_000),
   };
   let content: string | ContentBlock[] = JSON.stringify(facts);
-  if (!ctx.item.body && ctx.item.asset_url && /^https:\/\//.test(ctx.item.asset_url)) {
-    // An image or a PDF with no text: let the model look at the file itself through its short-lived address.
-    const block: ContentBlock = ctx.item.kind === "image" ? { type: "image", source: { type: "url", url: ctx.item.asset_url } } : { type: "document", source: { type: "url", url: ctx.item.asset_url } };
+  if (!ctx.item.body) {
+    // No text. An image or a PDF is looked at by the model itself; a text file's content would
+    // already be the body, so anything else here has nothing to read.
+    const block = fileBlock(ctx.item.asset_type, ctx.item.asset_url);
+    if (!block) {
+      console.warn(`analysis of ${itemId}: no content (${ctx.item.asset_url ? `a ${ctx.item.asset_type ?? "file"} the model cannot be given` : "no text and no file"})`);
+      return unavailable(itemId);
+    }
     content = [block, { type: "text", text: JSON.stringify(facts) }];
-  } else if (!ctx.item.body) {
-    return { result: { kind: "analysis", item_id: itemId, unavailable: true }, usage: null };
   }
-  const reply = await callModel(env, { timeoutMs: 25_000, maxTokens: 2000, system: ANALYSIS_SYSTEM(rules.lang as Lang), content });
-  if (!reply) return null;
+  let why = "no reply";
+  const reply = await callModel(env, { timeoutMs: 25_000, maxTokens: 2000, system: ANALYSIS_SYSTEM(rules.lang as Lang), content, onFailure: (reason) => (why = reason) });
+  if (!reply) return { failure: why };
   const usage = { input: reply.inputTokens, output: reply.outputTokens, model: reply.model };
   const x = extractJson(reply.text) as any;
-  if (!x || typeof x !== "object") return null;
-  if (x.unavailable === true) return { result: { kind: "analysis", item_id: itemId, unavailable: true }, usage };
+  if (!x || typeof x !== "object") return { failure: "the reply is not JSON" };
+  if (x.unavailable === true) return unavailable(itemId, usage);
   const summary = str(x.summary, LIMITS.analysis_summary_max_chars);
-  if (!summary || !VERDICTS.includes(x.verdict)) return null;
+  if (!summary || !VERDICTS.includes(x.verdict)) return { failure: "the reply lacks a summary or a verdict" };
   const result: Record<string, unknown> = {
     kind: "analysis",
     item_id: itemId,
@@ -130,10 +149,17 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   return { result, usage };
 }
 
+/** What the user reads when the built-in assistant gave up on an item. */
+const COULD_NOT_READ: Record<Lang, string> = { zh: "内容读不出来", en: "Content could not be read" };
+
 /** One round of analyses for one user, within the daily cap. */
 export async function analyseForUser(env: Env, userId: string, origin: string): Promise<number> {
   const actor = await builtinActor(env, userId, "worker");
   if (!actor) return 0;
+  if (!modelConfigured(env)) {
+    console.warn("analysis skipped: no credential (LLM_API_KEY is not set)");
+    return 0;
+  }
   const user = await getUser(env, userId);
   const left = await capLeft(env, user, "analysis", num(env.ANALYSIS_PER_USER_PER_DAY, 200));
   if (left === 0) return 0;
@@ -142,7 +168,23 @@ export async function analyseForUser(env: Env, userId: string, origin: string): 
   await seen(env, actor);
   try {
     const rules = await getRules(env, actor, "analysis");
-    const done = (await Promise.all(claim.work.map((w) => analyseOne(env, actor, w.ref, rules, origin).catch(() => null)))).filter((d) => d !== null);
+    const tried = await Promise.all(
+      claim.work.map((w) => analyseOne(env, actor, w.ref, rules, origin).catch((e): Analysed => ({ failure: `error: ${e instanceof Error ? e.message : String(e)}` }))),
+    );
+    const done: { result: Record<string, unknown>; usage: { input: number; output: number; model: string } | null }[] = [];
+    for (const [i, outcome] of tried.entries()) {
+      if ("result" in outcome) {
+        done.push(outcome);
+        continue;
+      }
+      // A failure is counted per item. After the third, the item is handed in as unreadable, so
+      // that the user sees the truth and the model is not asked about it every minute for ever.
+      const itemId = claim.work[i].ref;
+      const attempts = await noteAnalysisFailure(env, actor, itemId);
+      const last = attempts >= ANALYSIS_MAX_ATTEMPTS;
+      console.warn(`analysis of ${itemId} failed (attempt ${attempts} of ${ANALYSIS_MAX_ATTEMPTS}): ${outcome.failure}${last ? "; handed in as unreadable" : ""}`);
+      if (last) done.push({ result: { kind: "analysis", item_id: itemId, unavailable: true, summary: COULD_NOT_READ[rules.lang as Lang] ?? COULD_NOT_READ.en }, usage: null });
+    }
     let accepted = 0;
     if (done.length > 0) {
       const calls = done.filter((d) => d.usage);

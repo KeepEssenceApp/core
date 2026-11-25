@@ -20,6 +20,8 @@ export interface ModelRequest {
   content: string | ContentBlock[];
   maxTokens: number;
   timeoutMs: number;
+  /** Told why there is no reply (for the log). Never contains content or the key. */
+  onFailure?: (reason: string) => void;
 }
 
 export const DEFAULT_MODEL = "claude-haiku-5-5";
@@ -29,7 +31,11 @@ export function modelConfigured(env: Env): boolean {
 }
 
 export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply | null> {
-  if (!env.LLM_API_KEY) return null;
+  const fail = (reason: string) => {
+    req.onFailure?.(reason);
+    return null;
+  };
+  if (!env.LLM_API_KEY) return fail("no credential");
   const base = (env.LLM_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
   const model = env.LLM_MODEL || DEFAULT_MODEL;
   const abort = new AbortController();
@@ -62,15 +68,17 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      return null;
+      const what = response.status === 401 || response.status === 403 ? "credential refused" : "model answered";
+      return fail(`${what} ${response.status}`);
     }
     const data = (await response.json()) as any;
-    if (data?.stop_reason === "refusal" || !Array.isArray(data?.content)) return null;
+    if (data?.stop_reason === "refusal") return fail("model refused");
+    if (!Array.isArray(data?.content)) return fail("reply has no content");
     const text = data.content
       .filter((b: any) => b?.type === "text" && typeof b.text === "string")
       .map((b: any) => b.text)
       .join("");
-    if (!text.trim()) return null;
+    if (!text.trim()) return fail("reply is empty");
     return {
       text,
       model: typeof data.model === "string" ? data.model : model,
@@ -81,8 +89,8 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
         (Number(data.usage?.cache_read_input_tokens) || 0),
       outputTokens: Number(data.usage?.output_tokens) || 0,
     };
-  } catch {
-    return null;
+  } catch (e) {
+    return fail(abort.signal.aborted ? `no reply within ${req.timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
   } finally {
     clearTimeout(timer);
   }

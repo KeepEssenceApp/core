@@ -5,9 +5,10 @@ import { err } from "../errors";
 import { NO_CONTENT, ok, type Cx, type Handler, type ItemRow, type Result } from "../types";
 import { decodeCursor, encodeCursor, firstSentence, iso, newId, parseJson, truncate } from "../util";
 import { listAssistants } from "../services/accounts";
-import { deleteIfUnreferenced, refStatement, type AssetRow } from "../services/assets";
+import { assetText, deleteIfUnreferenced, isTextType, refStatement, type AssetRow } from "../services/assets";
 import { idempotent, rateLimit } from "../services/guard";
 import {
+  bodyMaxChars,
   cleanTitle,
   countStatement,
   defaultSite,
@@ -55,7 +56,7 @@ async function save(cx: Cx): Promise<Result> {
     const existing = await env.DB.prepare("SELECT id FROM items WHERE user_id = ? AND url_key = ? AND archived_at IS NULL").bind(user.id, key).first<{ id: string }>();
     if (existing) return ok(saveResult(cx, "duplicate", existing.id, "duplicate"));
   }
-  const text = (b.text ?? "").trim();
+  let text = (b.text ?? "").trim();
   if (b.kind === "text" && !text) throw err("bad_request", "存入文字需要 text。", "Saving text needs `text`.");
   let asset: AssetRow | null = null;
   let imageStored: boolean | undefined;
@@ -65,6 +66,12 @@ async function save(cx: Cx): Promise<Result> {
     if (!asset) throw err("bad_request", "没有这个附件。", "There is no such attachment.");
     if (asset.status === "pending") throw err("bad_request", "附件还没传完。", "The attachment was not uploaded completely.");
     imageStored = asset.status === "stored";
+    // A text file is read here, once: its content is the item's body, so that triage and every
+    // assistant get the text itself (QA #20). Images and PDFs stay files.
+    if (imageStored && isTextType(asset.content_type)) {
+      const fileText = await assetText(env, asset, bodyMaxChars(env));
+      if (fileText) text = truncate(text ? `${text}\n\n${fileText}` : fileText, bodyMaxChars(env));
+    }
   }
 
   const id = newId("itm");
@@ -257,6 +264,7 @@ export const updateItem: Handler = async (cx) => {
       // Whoever held the item for analysis loses it; the new assistant picks it up on its next visit.
       cx.env.DB.prepare(
         `UPDATE items SET dispatch_to = ?1,
+           analysis_attempts = CASE WHEN dispatch_to IS NOT ?1 THEN 0 ELSE analysis_attempts END,
            claim_id = CASE WHEN triaged_at IS NOT NULL AND analysed_at IS NULL AND dispatch_to IS NOT ?1 THEN NULL ELSE claim_id END,
            claim_expires_at = CASE WHEN triaged_at IS NOT NULL AND analysed_at IS NULL AND dispatch_to IS NOT ?1 THEN NULL ELSE claim_expires_at END
          WHERE id = ?2 AND user_id = ?3`,
