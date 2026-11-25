@@ -451,8 +451,10 @@ export async function submitResults(env: Env, actor: AssistantActor, claimId: st
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(item.id, user.id, a.unavailable ? 1 : 0, a.summary, a.key_fact, JSON.stringify(a.points), a.verdict, a.related_hint, actor.assistantId, claim.id, t),
           env.DB.prepare("UPDATE items SET analysed_at = ?, claim_id = NULL, claim_expires_at = NULL WHERE id = ? AND user_id = ?").bind(t, item.id, user.id),
-          countStatement(env, user, "analysed"),
         );
+        // The day's count is of items analysed, not of hand-ins: a second analysis of the same
+        // item (another claim replacing the first) is not counted again.
+        if (!item.analysed_at) statements.push(countStatement(env, user, "analysed"));
         if (actor.builtIn) {
           statements.push(capStatement(env, user, "analysis"));
           if (user.notify) statements.push(notifyEventStatement(env, user.id, item.id, "analysis"));
