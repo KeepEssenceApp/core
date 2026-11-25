@@ -95,10 +95,16 @@ export function displayTitle(row: { title: string; content_unavailable: number; 
   return label[row.kind]?.[lang] ?? "";
 }
 
-export function daysLeft(row: Pick<ItemRow, "pinned" | "expires_at" | "hard_expires_at" | "queue_holds">, t = now()): number | null {
+/** The moment the item is deleted as things stand now; null when it is kept without expiry. */
+export function endsAt(row: Pick<ItemRow, "pinned" | "expires_at" | "hard_expires_at" | "queue_holds">, t = now()): number | null {
   if (row.pinned) return null;
   const soft = row.queue_holds > 0 ? Math.max(row.expires_at, t) : row.expires_at;
-  return Math.max(0, Math.ceil((Math.min(soft, row.hard_expires_at) - t) / DAY));
+  return Math.min(soft, row.hard_expires_at);
+}
+
+export function daysLeft(row: Pick<ItemRow, "pinned" | "expires_at" | "hard_expires_at" | "queue_holds">, t = now()): number | null {
+  const end = endsAt(row, t);
+  return end === null ? null : Math.max(0, Math.ceil((end - t) / DAY));
 }
 
 export function analysisView(row: ItemJoined, names: Names, lang: Lang) {

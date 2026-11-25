@@ -3,7 +3,7 @@ import { DAY, MINUTE, now } from "../clock";
 import { LIMITS, num, type Env } from "../env";
 import { err } from "../errors";
 import { NO_CONTENT, ok, type Cx, type Handler, type ItemRow, type Result } from "../types";
-import { decodeCursor, encodeCursor, firstSentence, newId, parseJson, truncate } from "../util";
+import { decodeCursor, encodeCursor, firstSentence, iso, newId, parseJson, truncate } from "../util";
 import { listAssistants } from "../services/accounts";
 import { deleteIfUnreferenced, refStatement, type AssetRow } from "../services/assets";
 import { idempotent, rateLimit } from "../services/guard";
@@ -11,6 +11,7 @@ import {
   cleanTitle,
   countStatement,
   defaultSite,
+  endsAt,
   fetchItemContent,
   ITEM_FROM,
   ITEM_SELECT,
@@ -175,8 +176,12 @@ async function detail(cx: Cx, id: string) {
     ...itemView(item, n, cx.lang),
     body: item.body,
     asset_id: item.asset_id,
-    tags: (tags.results as { kind: string; value: string }[]).map((t) => `${t.kind}:${t.kind === "assistant" ? (n.get(t.value) ?? t.value) : t.value}`),
+    // A kept item has no end date, so its expiry tag does not apply and is not listed (QA #7).
+    tags: (tags.results as { kind: string; value: string }[])
+      .filter((t) => !(item.pinned && t.kind === "expiry"))
+      .map((t) => `${t.kind}:${t.kind === "assistant" ? (n.get(t.value) ?? t.value) : t.value}`),
     expiry_days: item.pinned ? null : item.expiry_days,
+    expires_at: iso(endsAt(item)),
   };
 }
 
@@ -196,23 +201,51 @@ function userTag(env: Env, userId: string, itemId: string, kind: string, value: 
   ).bind(itemId, userId, kind, value);
 }
 
-/** The user changes who analyses the item and how long it is kept. These edits win over triage. */
+/**
+ * Statements that record the item's retention, and its assistant when it has one, as set by the
+ * user. Triage never overwrites a user-set tag, so after any edit by the user neither value moves.
+ */
+function userSetStatements(env: Env, userId: string, itemId: string, expiryDays: number, dispatchTo: string | null): D1PreparedStatement[] {
+  const out = [userTag(env, userId, itemId, "expiry", String(expiryDays))];
+  if (dispatchTo) out.push(userTag(env, userId, itemId, "assistant", dispatchTo));
+  return out;
+}
+
+/**
+ * The user changes who analyses the item and how long it is kept. Either edit protects both
+ * values from a later triage. Days chosen on a kept item give it an end date again, counted from now.
+ */
 export const updateItem: Handler = async (cx) => {
   const item = await liveItem(cx.env, cx.user!.id, cx.path.id);
   if (!item) throw err("not_found");
   const statements: D1PreparedStatement[] = [];
+  let days = item.expiry_days;
+  let dispatchTo = item.dispatch_to;
   if (cx.body.expiry_days !== undefined) {
-    const days = maxExpiryDays(cx.body.expiry_days);
-    statements.push(
-      cx.env.DB.prepare("UPDATE items SET expiry_days = ?, expires_at = ? WHERE id = ? AND user_id = ?").bind(days, item.created_at + days * DAY, item.id, cx.user!.id),
-      userTag(cx.env, cx.user!.id, item.id, "expiry", String(days)),
-    );
+    days = maxExpiryDays(cx.body.expiry_days);
+    if (item.pinned) {
+      const expires = now() + days * DAY;
+      statements.push(
+        cx.env.DB.prepare("UPDATE items SET pinned = 0, expiry_days = ?, expires_at = ?, hard_expires_at = MAX(hard_expires_at, ?) WHERE id = ? AND user_id = ?").bind(
+          days,
+          expires,
+          expires,
+          item.id,
+          cx.user!.id,
+        ),
+      );
+    } else {
+      statements.push(
+        cx.env.DB.prepare("UPDATE items SET expiry_days = ?, expires_at = ? WHERE id = ? AND user_id = ?").bind(days, item.created_at + days * DAY, item.id, cx.user!.id),
+      );
+    }
   }
   if (cx.body.dispatch_to !== undefined) {
     const target = (await listAssistants(cx.env, cx.user!.id)).find((a) => a.id === cx.body.dispatch_to);
     if (!target || target.built_in === "dispatch" || !parseJson<string[]>(target.steps, []).includes("analysis")) {
       throw err("bad_request", "只能交给助手清单里能解读的助手。", "The item can only go to an assistant in your list that may analyse.");
     }
+    dispatchTo = target.id;
     statements.push(
       // Whoever held the item for analysis loses it; the new assistant picks it up on its next visit.
       cx.env.DB.prepare(
@@ -221,10 +254,12 @@ export const updateItem: Handler = async (cx) => {
            claim_expires_at = CASE WHEN triaged_at IS NOT NULL AND analysed_at IS NULL AND dispatch_to IS NOT ?1 THEN NULL ELSE claim_expires_at END
          WHERE id = ?2 AND user_id = ?3`,
       ).bind(target.id, item.id, cx.user!.id),
-      userTag(cx.env, cx.user!.id, item.id, "assistant", target.id),
     );
   }
-  if (statements.length > 0) await cx.env.DB.batch(statements);
+  if (statements.length > 0) {
+    statements.push(...userSetStatements(cx.env, cx.user!.id, item.id, days, dispatchTo));
+    await cx.env.DB.batch(statements);
+  }
   return ok(await detail(cx, item.id));
 };
 
@@ -268,7 +303,12 @@ async function mustExist(cx: Cx): Promise<ItemRow> {
 
 export const pinItem: Handler = async (cx) => {
   const item = await mustExist(cx);
-  await cx.env.DB.prepare("UPDATE items SET pinned = 1 WHERE id = ? AND user_id = ?").bind(item.id, cx.user!.id).run();
+  // Keeping is the user's own decision about retention: a later triage does not change the term
+  // the item returns to when it gets an end date again.
+  await cx.env.DB.batch([
+    cx.env.DB.prepare("UPDATE items SET pinned = 1 WHERE id = ? AND user_id = ?").bind(item.id, cx.user!.id),
+    userTag(cx.env, cx.user!.id, item.id, "expiry", String(item.expiry_days)),
+  ]);
   return NO_CONTENT;
 };
 
@@ -277,9 +317,10 @@ export const unpinItem: Handler = async (cx) => {
   const item = await mustExist(cx);
   if (item.pinned) {
     const expires = now() + item.expiry_days * DAY;
-    await cx.env.DB.prepare("UPDATE items SET pinned = 0, expires_at = ?, hard_expires_at = MAX(hard_expires_at, ?) WHERE id = ? AND user_id = ?")
-      .bind(expires, expires, item.id, cx.user!.id)
-      .run();
+    await cx.env.DB.batch([
+      cx.env.DB.prepare("UPDATE items SET pinned = 0, expires_at = ?, hard_expires_at = MAX(hard_expires_at, ?) WHERE id = ? AND user_id = ?").bind(expires, expires, item.id, cx.user!.id),
+      userTag(cx.env, cx.user!.id, item.id, "expiry", String(item.expiry_days)),
+    ]);
   }
   return NO_CONTENT;
 };
