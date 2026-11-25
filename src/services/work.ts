@@ -260,14 +260,16 @@ export function triageStatements(
   dispatchTo: string | null,
   expiryDays: number,
   setBy: "triage" | "core",
+  /** Whether the sorting step itself chose each value. A value it left out is the core's default. */
+  chose: { assistant: boolean; expiry: boolean } = { assistant: setBy === "triage", expiry: setBy === "triage" },
 ): D1PreparedStatement[] {
   const finalDispatch = userTags.has("assistant") ? item.dispatch_to : dispatchTo;
   const finalDays = userTags.has("expiry") ? item.expiry_days : maxExpiryDays(expiryDays);
-  const upsert = (kind: string, value: string) =>
+  const upsert = (kind: "assistant" | "expiry", value: string) =>
     env.DB.prepare(
       `INSERT INTO item_tags (item_id, user_id, kind, value, set_by) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (item_id, kind) DO UPDATE SET value = excluded.value, set_by = excluded.set_by WHERE item_tags.set_by <> 'user'`,
-    ).bind(item.id, item.user_id, kind, value, setBy);
+    ).bind(item.id, item.user_id, kind, value, chose[kind] ? "triage" : "core");
   const out = [
     env.DB.prepare(
       `UPDATE items SET dispatch_to = ?, expiry_days = ?, expires_at = ?, triaged_at = ?, claim_id = NULL, claim_expires_at = NULL
@@ -428,7 +430,7 @@ export async function submitResults(env: Env, actor: AssistantActor, claimId: st
           throw invalid(r.item_id, `寿命只能是 ${options.join("、")} 之一`, `expiry_days must be one of ${options.join(", ")}`);
         }
         statements.push(
-          ...triageStatements(env, item, tags.get(item.id) ?? new Set(), dispatchTo, r.expiry_days ?? LIMITS.item_expiry_default_days, "triage"),
+          ...triageStatements(env, item, tags.get(item.id) ?? new Set(), dispatchTo, r.expiry_days ?? LIMITS.item_expiry_default_days, "triage", { assistant: r.assistant !== undefined, expiry: r.expiry_days !== undefined }),
           capStatement(env, user, "triage"),
         );
         accept(r.item_id);

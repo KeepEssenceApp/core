@@ -80,6 +80,8 @@ describe("K8 triage", () => {
     const calls: any[] = [];
     const base = makeEnv();
     const ann = await signIn(base);
+    // The sorting step sets a retention only when the user's rules give it grounds to.
+    await base.DB.prepare("UPDATE users SET rules = 'Keep thoughts for 90 days.' WHERE id = ?").bind(ann.userId).run();
     await base.DB.prepare("INSERT INTO daily_caps (user_id, day, kind, n) VALUES (?, '2026-11-24', 'triage', 198)").bind(ann.userId).run();
     const ids: string[] = [];
     for (let i = 0; i < 4; i++) ids.push(await saveText(base, ann.token, `Thought number ${i}.`));

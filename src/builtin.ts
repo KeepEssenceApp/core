@@ -35,12 +35,14 @@ export async function dispatchForUser(env: Env, userId: string): Promise<number>
     const rules = await getRules(env, actor, "triage");
     const contexts = await Promise.all(claim.work.map((w) => getContext(env, actor, w.ref, "triage", "")));
     const candidates = rules.assistants.filter((a) => a.steps.includes("analysis")).map((a) => a.name);
+    const hasRules = rules.rules.trim().length > 0;
     const reply = await callModel(env, {
       timeoutMs: 10_000,
       maxTokens: 1500,
       system:
         "You sort saved items. For each item decide which assistant analyses it and how many days it is kept. " +
-        "You see only the title, the site and the opening of each item. Follow the user's rules when they apply; otherwise leave a field out. " +
+        "You see only the title, the site and the opening of each item. Decide only what the user's rules decide: set `assistant` or `expiry_days` for an item only when the rules say who analyses such an item or how long it is kept. " +
+        "Never choose on your own judgement of the content; when the rules do not cover it, leave the field out and the default applies. " +
         'Answer with JSON only: an array of {"item_id": string, "assistant"?: string, "expiry_days"?: number}. ' +
         "`assistant` must be exactly one of the listed names. `expiry_days` must be one of the listed options.",
       content: JSON.stringify({
@@ -64,7 +66,8 @@ export async function dispatchForUser(env: Env, userId: string): Promise<number>
       const result: Record<string, unknown> = { kind: "triage", item_id: w.ref };
       // Anything the model made up is dropped; the core then fills in the default.
       if (x && typeof x.assistant === "string" && candidates.includes(x.assistant)) result.assistant = x.assistant;
-      if (x && rules.expiry_options.includes(x.expiry_days)) result.expiry_days = x.expiry_days;
+      // Without rules from the user there is nothing to decide by: the default stands (QA #32, #40).
+      if (x && hasRules && rules.expiry_options.includes(x.expiry_days)) result.expiry_days = x.expiry_days;
       return result;
     });
     const usage: UsageInput = { model: reply.model, input_tokens: reply.inputTokens, output_tokens: reply.outputTokens, calls: 1 };
