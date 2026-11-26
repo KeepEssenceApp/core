@@ -2,7 +2,7 @@
 // job; the item is saved at once, waits, and the minute job asks about it. Everything here is made
 // up: the runner is a stand-in, the addresses and texts belong to nobody.
 import { describe, expect, it } from "vitest";
-import { advance, DAY, HOUR, MINUTE } from "../src/clock";
+import { advance, DAY, HOUR, MINUTE, now } from "../src/clock";
 import { composeNotification } from "../src/services/notify";
 import { expireItems, pollVideos, runMinute } from "../src/cron";
 import type { Env } from "../src/env";
@@ -25,7 +25,7 @@ function runnerStub(env: () => Env) {
   const calls: { method: string; path: string; auth?: string; accept?: string }[] = [];
   const pages = new Map<string, () => Response | Promise<Response>>();
   const jobs = new Map<string, () => Response>();
-  const state = { down: false };
+  const state = { down: false, timeout: false };
   const answer = {
     page: (address: string, body: unknown, status = 200) => pages.set(address, () => Response.json(body, { status })),
     reading: (address: string, job: string, content: string, seconds = 111) =>
@@ -34,6 +34,8 @@ function runnerStub(env: () => Env) {
   };
   const outbound: Outbound = async (url, init) => {
     if (state.down) throw new Error("connection refused");
+    // Too slow: what a request that outlives the core's own timer ends with (the fetch is aborted).
+    if (state.timeout) throw new DOMException("The operation was aborted", "AbortError");
     const path = url.slice(RUNNER.length);
     const h = (init?.headers ?? {}) as Record<string, string>;
     const method = init?.method ?? "GET";
@@ -648,5 +650,185 @@ describe("K25 what the words of a video are, and where they are not", () => {
     expect(meta.shared_rules.video.reading.en).toBe("Reading what is said in the video. The analysis follows when it is done.");
     expect(meta.shared_rules.video.too_long.zh).toContain("{minutes}");
     expect(Object.keys(meta.shared_rules.video).sort()).toEqual(["description", "no_speech", "reading", "recognized_text_label", "recognized_text_note", "too_long", "unavailable"]);
+  });
+});
+
+// #101: the daily digest when the runner is down or too slow. The fault is injected in the stand-in for the
+// reader service (and only there); everything else is the core's own: the save, the minute job, the model
+// stand-in, the digest job and the API a client reads. One made-up user, one local day (Asia/Shanghai, T0 is
+// 12:00 and the digest is due at 21:00), nobody's real content.
+describe("K26 the runner is down or too slow, and the daily digest still comes", () => {
+  const POISON = "QUOKKAPOISON 这一段只有在核心错误地收下迟到的转写时才会出现在摘要里。";
+  const DIGEST_AT = T0 + 9 * HOUR; // 21:00 on the local day
+  const DAY1 = "2026-11-24";
+  const titleOf = (c: any) => inputOf(c).title;
+  const modelCallsOf = (calls: any[], kind: string) => calls.filter((c) => kinds([c])[0] === kind);
+  const toDigestTime = () => advance(DIGEST_AT - now());
+
+  async function readDigest(env: Env, who: Session, day = "latest") {
+    const r = await call(env, "GET", `/v1/digests/${day}`, { token: who.token });
+    expect(r.status).toBe(200);
+    return r.json;
+  }
+
+  it("K26: down at the save, too slow at the save, and gone for the whole wait: the ordinary items are analysed at once, the digest is written on time with all five, and no word is made up", async () => {
+    const { env, runner, modelCalls, ann } = await world();
+    const honest = (await call(env, "GET", "/v1/meta")).json.shared_rules.content_unavailable.en;
+
+    // 12:00. Two ordinary items, and three videos whose reading goes wrong in three ways.
+    const t1 = await saveText(env, ann.token, "Green tea likes cooler water. Steep it for two minutes.", "Brewing green tea");
+    const t2 = await saveText(env, ann.token, "Black tea takes boiling water and four minutes.", "Brewing black tea");
+    runner.reading(`${ADDR}-c`, "job-c", LONG_CAPTION);
+    runner.job("job-c", { state: "reading" });
+    const c = await save(env, ann, `${ADDR}-c`); // the page was read; the video is still being read
+    runner.state.down = true;
+    const a = await save(env, ann, `${ADDR}-a`); // refused
+    runner.state.down = false;
+    runner.state.timeout = true;
+    const b = await save(env, ann, `${ADDR}-b`); // too slow
+    runner.state.timeout = false;
+    runner.state.down = true; // and from now on the runner does not answer at all
+    expect(await detail(env, ann, a)).toMatchObject({ content_unavailable: true, video_state: null, recognized_text: null });
+    expect(await detail(env, ann, b)).toMatchObject({ content_unavailable: true, video_state: null, recognized_text: null });
+    expect(await detail(env, ann, c)).toMatchObject({ video_state: "reading", recognized_text: null });
+
+    // Not blocked: the ordinary items are triaged and analysed at once, while the video still waits. (The minute job
+    // analyses a few items at a time; two minutes is enough for all of these.)
+    await runMinute(env);
+    await runMinute(env);
+    expect(modelCallsOf(modelCalls, "analysis").map(titleOf).sort()).toEqual(["Brewing black tea", "Brewing green tea"]);
+    expect(await detail(env, ann, t1)).toMatchObject({ stage: "analysed" });
+    expect(await detail(env, ann, t2)).toMatchObject({ stage: "analysed" });
+    expect(await detail(env, ann, c)).toMatchObject({ stage: "saved", video_state: "reading" });
+    // An item whose content could not be fetched gets its one honest analysis without the model being asked.
+    for (const id of [a, b]) expect(await db(env, "SELECT unavailable, summary FROM analyses WHERE item_id = ?", id)).toEqual([{ unavailable: 1, summary: expect.any(String) }]);
+
+    // The wait runs out (60 minutes after the save): what the author wrote is analysed, the video says nothing.
+    advance(61 * MINUTE);
+    await runMinute(env);
+    expect(await detail(env, ann, c)).toMatchObject({ stage: "analysed", video_state: "unavailable", recognized_text: null, body: LONG_CAPTION });
+    const forC = modelCallsOf(modelCalls, "analysis").find((x) => inputOf(x).content === LONG_CAPTION)!;
+    expect(inputOf(forC)).not.toHaveProperty("recognized_text");
+
+    // The runner comes back and would now say what the video says. The core is no longer asking, and takes nothing from it.
+    runner.state.down = false;
+    runner.job("job-c", done(POISON));
+    const asked = runner.asked("job-c");
+    await runMinute(env);
+    expect(runner.asked("job-c")).toBe(asked);
+
+    // 21:00: the digest is written by the digest job, once, on time.
+    toDigestTime();
+    await runMinute(env);
+    const digestCalls = modelCallsOf(modelCalls, "digest");
+    expect(digestCalls).toHaveLength(1);
+    const ctx = inputOf(digestCalls[0]);
+    expect(ctx.day).toBe(DAY1);
+    expect(ctx.analyses.map((x: any) => x.item_id).sort()).toEqual([t1, t2, a, b, c].sort());
+    // What the model is shown: the honest sentence for the two that could not be read, nothing of a transcript anywhere.
+    for (const id of [a, b]) {
+      const x = ctx.analyses.find((y: any) => y.item_id === id);
+      expect(x).toMatchObject({ unavailable: true, summary: honest });
+      expect(x).not.toHaveProperty("points");
+      expect(x).not.toHaveProperty("verdict");
+    }
+    expect(ctx.analyses.find((y: any) => y.item_id === c)).toMatchObject({ unavailable: false });
+    expect(JSON.stringify(digestCalls[0].request)).not.toContain("QUOKKAPOISON");
+    expect(JSON.stringify(digestCalls[0].request)).not.toContain("recognized_text");
+
+    // The digest as stored and as a client reads it: done, and the numbers agree with each other and with the items.
+    const [stored] = await db(env, "SELECT status, day, entries, covers, summary FROM digests WHERE user_id = ?", ann.userId);
+    expect(stored).toMatchObject({ status: "done", day: DAY1 });
+    const snapshot = (JSON.parse(stored.entries) as { item_id: string }[]).map((e) => e.item_id).sort();
+    expect(snapshot).toEqual([t1, t2, a, b, c].sort());
+    expect(JSON.parse(stored.covers)).toEqual([DAY1]);
+    const shown = await readDigest(env, ann);
+    expect(shown.day).toBe(DAY1);
+    expect(shown.counts.saved).toBe(5);
+    expect(shown.worth.length + shown.rest.length).toBe(shown.counts.saved);
+    expect(shown.counts.worth).toBe(shown.worth.length);
+    expect([...shown.worth, ...shown.rest].map((e: any) => e.item_id).sort()).toEqual(snapshot);
+    expect(JSON.stringify(shown)).not.toContain("QUOKKAPOISON");
+    // The items agree: every one of the five is marked as covered by this digest and by no other.
+    expect(await db(env, "SELECT id, digest_day FROM items ORDER BY id")).toEqual([t1, t2, a, b, c].sort().map((id) => ({ id, digest_day: DAY1 })));
+    // The day's counts, the status and the calendar agree with the digest.
+    const day = (await db(env, "SELECT SUM(saved) AS saved, SUM(digests) AS digests FROM daily_counts WHERE user_id = ? AND day = ?", ann.userId, DAY1))[0];
+    expect(day).toEqual({ saved: 5, digests: 1 });
+    expect((await call(env, "GET", "/v1/status", { token: ann.token })).json).toMatchObject({ waiting: 0, no_digest_reason: null });
+    const cal = (await call(env, "GET", "/v1/calendar", { token: ann.token })).json;
+    expect(cal.days.find((d: any) => d.day === DAY1)).toMatchObject({ has_digest: true });
+    expect(cal.counts).toMatchObject({ saved: 5, digests: 1 });
+
+    // No word was made up: no recognized text anywhere, no analysis of an item that could not be read has points, one analysis for each item.
+    expect(await db(env, "SELECT id FROM items WHERE recognized_text IS NOT NULL")).toEqual([]);
+    expect(await db(env, "SELECT item_id FROM analyses WHERE unavailable = 1 AND points IS NOT NULL AND points != '[]'")).toEqual([]);
+    expect(await db(env, "SELECT COUNT(*) AS n FROM analyses")).toEqual([{ n: 5 }]);
+    // A second minute job writes no second digest and analyses nothing again.
+    const calls = modelCalls.length;
+    await runMinute(env);
+    expect(modelCalls.length).toBe(calls);
+    expect(await db(env, "SELECT day, status FROM digests")).toEqual([{ day: DAY1, status: "done" }]);
+    expect((await statsOf(env)).find((s) => s.path === "video_failed")).toMatchObject({ n: 1 });
+  });
+
+  it("K26: a video that is still waiting when the digest is due does not hold it back; the digest does not cover it, and the next one does", async () => {
+    const { env, runner, modelCalls, ann } = await world();
+    // 20:00 local: ordinary items. 20:30: a video whose page was read, and then the runner goes away.
+    advance(8 * HOUR);
+    const t1 = await saveText(env, ann.token, "Green tea likes cooler water. Steep it for two minutes.", "Brewing green tea");
+    const t2 = await saveText(env, ann.token, "Black tea takes boiling water and four minutes.", "Brewing black tea");
+    await runMinute(env);
+    expect(await detail(env, ann, t1)).toMatchObject({ stage: "analysed" });
+    advance(30 * MINUTE);
+    runner.reading(ADDR, "job-d", LONG_CAPTION);
+    runner.job("job-d", { state: "reading" });
+    const d = await save(env, ann, ADDR);
+    runner.state.timeout = true; // too slow from here on
+    await runMinute(env);
+    expect(await detail(env, ann, d)).toMatchObject({ stage: "saved", video_state: "reading" });
+
+    // 21:00: the digest is written with the two ordinary items. The video is not in it, is not marked as covered, and still waits.
+    toDigestTime();
+    await runMinute(env);
+    const first = modelCallsOf(modelCalls, "digest");
+    expect(first).toHaveLength(1);
+    expect(inputOf(first[0]).analyses.map((x: any) => x.item_id).sort()).toEqual([t1, t2].sort());
+    const one = await readDigest(env, ann);
+    expect(one).toMatchObject({ day: DAY1, counts: { saved: 2 } });
+    expect(one.worth.length + one.rest.length).toBe(2);
+    expect(await db(env, "SELECT id, digest_day FROM items WHERE id = ?", d)).toEqual([{ id: d, digest_day: null }]);
+    expect(await detail(env, ann, d)).toMatchObject({ stage: "saved", video_state: "reading" });
+    expect((await call(env, "GET", "/v1/status", { token: ann.token })).json).toMatchObject({ waiting: 1, no_digest_reason: null });
+    // What the user sees today says that the video waits (it is listed, as waiting), and its words are not invented.
+    const listed = (await call(env, "GET", "/v1/items?state=today", { token: ann.token })).json.items;
+    expect(listed.find((i: any) => i.id === d)).toMatchObject({ video_state: "reading" });
+
+    // 21:31: the wait is over (it began at 20:30). The author's words are analysed; the digest of the day is not written again.
+    advance(31 * MINUTE);
+    runner.state.timeout = false;
+    runner.state.down = true;
+    await runMinute(env);
+    expect(await detail(env, ann, d)).toMatchObject({ stage: "analysed", video_state: "unavailable", recognized_text: null });
+    expect(modelCallsOf(modelCalls, "digest")).toHaveLength(1);
+    expect(await db(env, "SELECT day, status FROM digests")).toEqual([{ day: DAY1, status: "done" }]);
+    // The first digest is as it was: the same two entries, the same numbers.
+    expect(await readDigest(env, ann, DAY1)).toEqual(one);
+
+    // Next day 21:00: the second digest covers the video (and only it), and the first is still as it was.
+    advance(DAY - (now() - DIGEST_AT) % DAY);
+    await runMinute(env);
+    const second = modelCallsOf(modelCalls, "digest");
+    expect(second).toHaveLength(2);
+    expect(inputOf(second[1]).analyses.map((x: any) => x.item_id)).toEqual([d]);
+    expect(inputOf(second[1]).analyses[0]).toMatchObject({ unavailable: false });
+    expect(JSON.stringify(second[1].request)).not.toContain("recognized_text");
+    const two = await readDigest(env, ann);
+    expect(two).toMatchObject({ day: "2026-11-25", counts: { saved: 1 }, previous_day: DAY1 });
+    expect(await readDigest(env, ann, DAY1)).toEqual({ ...one, next_day: "2026-11-25" });
+    expect(await db(env, "SELECT id, digest_day FROM items ORDER BY id")).toEqual(
+      [t1, t2].map((id) => ({ id, digest_day: DAY1 })).concat({ id: d, digest_day: "2026-11-25" }).sort((x, y) => (x.id < y.id ? -1 : 1)),
+    );
+    expect(await db(env, "SELECT day FROM digests ORDER BY day")).toEqual([{ day: DAY1 }, { day: "2026-11-25" }]);
+    expect(await db(env, "SELECT id FROM items WHERE recognized_text IS NOT NULL")).toEqual([]);
   });
 });
