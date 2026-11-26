@@ -89,6 +89,8 @@
 
 **做变异检查（临时改源码再还原）时，还原也要用 `/bin/cp -f`。**
 脚本里的 `cp` 又是带确认的别名，停在「overwrite? (y/n)」，源码留在改坏的状态，要手工还原。先把原文件另存一份，还原后用 `diff` 确认。
+**长度不明的请求体（分块上传）被拒后不能立刻关连接。** `test_a_body_without_a_length_is_411` 在 CI 上偶尔挂在 `BrokenPipeError`（本机循环 400 次约 7 次）。原因在服务端，不在测试：回 411 时分块的请求体还在路上，`_drain` 只会按 `Content-Length` 读，分块的长度不明，读 0 字节就关了连接，随后到的数据让内核回一个 RST，客户端写第二下就 `EPIPE`，答复也可能随 RST 丢掉。现在这种连接答完先 `shutdown(SHUT_WR)`，再把还在来的数据读掉扔掉（最多 `DRAIN_LIMIT`、`LINGER_SECONDS` 没动静就停，客户端关了就停），再关。`test_the_411_does_not_cut_off_a_chunked_body_that_is_still_on_its_way` 把请求体放在答复读完之后才发，旧写法每次都挂在同一处（`0\r\n\r\n` 那一下）。客户端真的断了（`OSError`）还是照旧当作断了，没有吞别的异常。
+
 ## 视频（#103）
 
 **等视频的条目要和「等页面」的一起排除，漏一处就会被解读。** 条目分派、解读的选取在好几处各写了一遍 `fetch_state <> 'pending'`（`work.ts` 的两个 WHERE、`cron.ts` 里内置助手的两条查询）。新增 `video_wait` 以后只改一处，另一处就会把还在等视频的条目拿去解读。现在统一写成 `services/items.ts` 里的 `WAITING_STATES`；把它改回只有 `pending`，`test/video.test.ts` 里四条测试会挂。核心自己的默认初筛（`applyTriageDefaults`、`triageDefaults`）原来对 pending 也不设防，这里对 `video_wait` 单独排除。
