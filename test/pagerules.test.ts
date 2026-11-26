@@ -1,6 +1,6 @@
 // QA #100: the rules the direct read judges a page by. Fabricated text only.
 import { describe, expect, it } from "vitest";
-import { assessPage, CAPTION_CHARS, onDomain, THIN_CHARS, titleWins, usableTitle, userAgentsFor, UA_DESKTOP, UA_IPHONE, WALL_HINTS, wallHint } from "../src/services/pagerules";
+import { assessPage, CAPTION_CHARS, endedOnFrontPage, LOGIN_HINTS, loginAddress, onDomain, THIN_CHARS, titleWins, usableTitle, userAgentsFor, UA_DESKTOP, UA_IPHONE, WALL_HINTS, wallHint, XIAOHONGSHU } from "../src/services/pagerules";
 
 const lines = (...l: string[]) => l.join("\n");
 const ARTICLE = "Steep green tea for two minutes in water of about eighty degrees, and taste it before the second cup, because the leaves give more each time they are steeped.";
@@ -9,7 +9,7 @@ describe("QA #100: which User-Agent, in what order", () => {
   it("desktop first and the iPhone second; the phone first for the apps that want it", () => {
     expect(userAgentsFor("https://blog.example.org/tea")).toEqual([UA_DESKTOP, UA_IPHONE]);
     for (const phone of [
-      "https://www.xiaohongshu.com/explore/1", "http://xhslink.com/a/b", "https://www.rednote.com/x", "https://www.douyin.com/video/1", "https://v.douyin.com/x", "https://www.bilibili.com/video/BV1",
+      "https://www.xiaohongshu.com/explore/1", "http://xhslink.com/a/b", "http://xhslink.cn/o/AbCd", "https://xhslink.cn/a/b", "https://www.rednote.com/x", "https://www.douyin.com/video/1", "https://v.douyin.com/x", "https://www.bilibili.com/video/BV1",
       "https://b23.tv/abc", "https://weibo.com/1/2", "https://m.weibo.cn/status/3", "https://t.cn/AbC", "https://www.kuaishou.com/x", "https://www.zhihu.com/question/1", "https://zhuanlan.zhihu.com/p/1",
     ]) {
       expect(`${phone} ${userAgentsFor(phone)[0] === UA_IPHONE}`).toBe(`${phone} true`);
@@ -144,5 +144,64 @@ describe("QA #100: titles", () => {
     expect(titleWins("example.org", "Example Domain")).toBe(true);
     expect(titleWins("", "Anything")).toBe(true);
     expect(titleWins("Anything", "")).toBe(false);
+  });
+});
+
+describe("QA #103: Xiaohongshu short links, and a sign-in page is not a page", () => {
+  it("xhslink.cn and xhslink.com are Xiaohongshu on the domain, before any redirect; look-alikes are not", () => {
+    for (const host of ["xhslink.cn", "xhslink.com", "www.xiaohongshu.com", "www.rednote.com", "a.b.xhslink.cn"]) expect(`${host} ${onDomain(host, XIAOHONGSHU)}`).toBe(`${host} true`);
+    for (const host of ["notxhslink.cn", "xhslink.cn.example.org", "xhslink.net", "example.org"]) expect(`${host} ${onDomain(host, XIAOHONGSHU)}`).toBe(`${host} false`);
+    // A short post on a short link is its caption, as on the site itself.
+    const caption = "周末在家把阳台收拾了一遍，种了薄荷、罗勒和小番茄，晚上泡了一杯薄荷茶，邻居也来坐了一会儿。";
+    expect(assessPage({ url: "https://xhslink.cn/o/AbCd", text: "Explore\nPost\nNotifications", description: caption })).toMatchObject({ quality: "ok", caption: true });
+  });
+
+  it("the address of a sign-in page: login or signin first in the path, or a passport host", () => {
+    for (const bad of [
+      "https://www.rednote.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fdiscovery%2Fitem%2F1", "https://www.xiaohongshu.com/login", "https://example.org/signin", "https://example.org/Sign-In?next=/a", "https://example.org/login/", "https://passport.example.org/a",
+    ]) {
+      expect(`${bad} ${loginAddress(bad)}`).toBe(`${bad} true`);
+    }
+    for (const good of ["https://www.xiaohongshu.com/discovery/item/1", "https://example.org/blog/login-tips", "https://example.org/login-tips", "https://example.org/", "https://example.org/a?next=/login", "https://notpassport.example.org/", "not an address", ""]) {
+      expect(`${good} ${loginAddress(good)}`).toBe(`${good} false`);
+    }
+  });
+
+  it("what a sign-in page says is a wall: in the title or the description, or at the top of a short page; the same words in a long article are not", () => {
+    const login = "登录\n使用 Google 账号登录\nContinue with Google\n使用 Apple 账号登录\n使用手机号或扫码登录";
+    expect(wallHint({ text: login })).toBe("使用手机号或扫码登录");
+    for (const hint of LOGIN_HINTS) {
+      expect(wallHint({ text: `${hint}\nanything else` })).toBe(hint);
+      expect(wallHint({ title: `Sign up | ${hint}` })).toBe(hint);
+      expect(wallHint({ description: hint })).toBe(hint);
+    }
+    const tutorial = `How to add a Continue with Google button to a site.\n${"Steep the leaves first, then add the button to the page and test it with a second account. ".repeat(8)}`;
+    expect(wallHint({ text: tutorial })).toBeNull();
+    expect(wallHint({ text: tutorial, title: "OAuth in ten minutes", description: "A small guide" })).toBeNull();
+    // A page that says it is a login page is not content, whatever else it is long enough to be.
+    expect(assessPage({ url: "https://www.rednote.com/x", text: login, wall: wallHint({ text: login }) })).toMatchObject({ quality: "blocked" });
+  });
+});
+
+describe("QA #103: a link that has run out ends on the front page", () => {
+  it("only a Xiaohongshu link that was asked for by something else and ended on the front page or the feed", () => {
+    const short = "https://xhslink.cn/o/AbCd";
+    for (const front of ["https://www.xiaohongshu.com/", "https://www.xiaohongshu.com", "https://www.xiaohongshu.com/explore", "https://www.rednote.com/explore/", "https://www.xiaohongshu.com/?source=web"]) {
+      expect(`${front} ${endedOnFrontPage(short, front)}`).toBe(`${front} true`);
+    }
+    // A note, a sign-in page, another site, or a link that was the front page to begin with.
+    for (const [asked, final] of [
+      [short, "https://www.xiaohongshu.com/discovery/item/6aa2"],
+      [short, "https://www.xiaohongshu.com/explore/6aa2"],
+      [short, "https://www.rednote.com/login?redirectPath=x"],
+      [short, "https://example.org/"],
+      ["https://example.org/a", "https://example.org/"],
+      ["https://www.xiaohongshu.com/", "https://www.xiaohongshu.com/"],
+      ["https://www.xiaohongshu.com/explore", "https://www.xiaohongshu.com/"],
+      ["not an address", "https://www.xiaohongshu.com/"],
+      [short, "not an address"],
+    ]) {
+      expect(`${asked} -> ${final} ${endedOnFrontPage(asked, final)}`).toBe(`${asked} -> ${final} false`);
+    }
   });
 });

@@ -8,7 +8,7 @@ import { now } from "../clock";
 import { num, outbound, type Env } from "../env";
 import { truncate } from "../util";
 import { fetchPage, isPublicUrl, type Page } from "./fetchpage";
-import { THIN_CHARS } from "./pagerules";
+import { onDomain, THIN_CHARS, XIAOHONGSHU } from "./pagerules";
 
 export type ProviderId = "direct" | "jina" | "firecrawl";
 export const PROVIDERS: ProviderId[] = ["direct", "jina", "firecrawl"];
@@ -180,7 +180,7 @@ export function platformOf(url: string): string {
     return "other";
   }
   if (host === "mp.weixin.qq.com" || host.endsWith(".weixin.qq.com")) return "wechat";
-  if (/(^|\.)(xiaohongshu\.com|rednote\.com|xhslink\.com)$/.test(host)) return "xiaohongshu";
+  if (onDomain(host, XIAOHONGSHU)) return "xiaohongshu";
   return "other";
 }
 

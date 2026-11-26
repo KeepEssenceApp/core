@@ -121,6 +121,30 @@ describe("K23 the runner is asked first for the links that have videos", () => {
   });
 });
 
+describe("QA #103: a Xiaohongshu short link is a Xiaohongshu link before it is followed", () => {
+  it("xhslink.cn and xhslink.com links go to the runner first, as the site's own links do", async () => {
+    let env!: Env;
+    const runner = runnerStub(() => env);
+    const direct: string[] = [];
+    const outbound: Outbound = async (url, init) => {
+      if (url.startsWith(RUNNER + "/")) return runner.outbound(url, init);
+      direct.push(url);
+      return new Response("no", { status: 404 });
+    };
+    env = makeEnv({ OUTBOUND: outbound });
+    await call(env, "PUT", "/admin/fetch", { token: ADMIN, body: { order: ["direct", "jina", "firecrawl"], jina: { enabled: true, endpoint: RUNNER, key: KEY } } });
+    const ann = await signIn(env);
+    for (const [n, short] of ["https://xhslink.cn/o/AbCd", "http://xhslink.com/a/b"].entries()) {
+      runner.reading(short, `job-short-${n}`, LONG_CAPTION);
+      runner.job(`job-short-${n}`, { state: "reading" });
+      const id = await save(env, ann, short);
+      expect(await detail(env, ann, id)).toMatchObject({ video_state: "reading", body: LONG_CAPTION });
+    }
+    expect(direct).toEqual([]);
+    expect(await statsOf(env)).toEqual([{ platform: "xiaohongshu", path: "jina", n: 2 }]);
+  });
+});
+
 describe("K23 a video is saved at once, read in the background, and analysed when its words are there", () => {
   it("K23: saved → reading → neither triaged nor analysed → still reading → done → analysed exactly once", async () => {
     const { env, runner, modelCalls, ann } = await world();
