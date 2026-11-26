@@ -6,7 +6,7 @@
 // post with nothing written is still a video post. What is said in the video is a job (jobs.ts) that the answer
 // names; a video that cannot be read is said so ("too_long", "unavailable") and never turns the page's own text
 // into a failure.
-import { assessPage, onDomain, hostOf, REFUSAL_STATUSES, usableTitle, userAgentsFor, wallHint } from "../../src/services/pagerules.ts";
+import { assessPage, hostOf, loginAddress, onDomain, REFUSAL_STATUSES, usableTitle, userAgentsFor, wallHint, XIAOHONGSHU } from "../../src/services/pagerules.ts";
 import { isPublicUrl } from "../../src/services/publicurl.ts";
 import type { Config } from "./config.ts";
 import { videoByAddress, videoInFrames, videoOfNote, type VideoRef } from "./detect.ts";
@@ -25,7 +25,7 @@ const chars = (s: string, max: number) => ([...s].length <= max ? s : [...s].sli
 export function platformOf(url: string): string {
   const host = hostOf(url);
   if (host === "mp.weixin.qq.com" || onDomain(host, ["weixin.qq.com"])) return "wechat";
-  if (onDomain(host, ["xiaohongshu.com", "rednote.com", "xhslink.com"])) return "xiaohongshu";
+  if (onDomain(host, XIAOHONGSHU)) return "xiaohongshu";
   if (onDomain(host, ["bilibili.com", "b23.tv"])) return "bilibili";
   if (onDomain(host, ["weibo.com", "weibo.cn"])) return "weibo";
   if (onDomain(host, ["v.qq.com"])) return "tencent";
@@ -84,10 +84,13 @@ export async function readUrl(renderer: Pick<Renderer, "render">, cfg: Config, u
         failure = { ok: false, kind: "error", message: `status ${got.status}` };
         break;
       }
-      // A page whose own data says it is a video note is not a wall: the data is the post's.
-      const wall = got.post?.video ? null : wallHint(got);
-      if (wall) {
-        failure = { ok: false, kind: "wall", message: `a verification wall answered (${wall})` };
+      // A page whose own data says it is a video note is not a wall: the data is the post's. A note's own data is what is
+      // judged, not the page around it (a login box that sits over a note is not the note).
+      // Otherwise a page that ended on a sign-in address, or says what a sign-in page says, was not given (QA #103).
+      const signIn = got.post?.video ? false : loginAddress(got.finalUrl);
+      const wall = got.post ? (got.post.video ? null : wallHint({ title: got.post.title, text: got.post.text })) : wallHint(got);
+      if (signIn || wall) {
+        failure = { ok: false, kind: "wall", message: signIn ? "the site asked for a sign-in" : `a verification wall answered (${wall})` };
         continue;
       }
       // A site whose own data says what the post is: the post is all that is judged and all that is returned.

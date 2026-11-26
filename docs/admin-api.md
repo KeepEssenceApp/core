@@ -135,14 +135,17 @@ What `direct` does (rules in `src/services/pagerules.ts`; nothing is sent to any
 the user saved):
 
 - It asks as a desktop browser, then as an iPhone; the apps that want a phone (Xiaohongshu, Douyin,
-  Bilibili, Weibo, Zhihu, Kuaishou and their short-link hosts, matched on the domain, not as a
+  Bilibili, Weibo, Zhihu, Kuaishou and their short-link hosts, `xhslink.cn` and `xhslink.com` among them, matched on the domain, not as a
   substring of the address) get the iPhone first. The request carries `Accept-Language: zh-CN,zh;q=0.9,en;q=0.8`.
   The first answer that is not a refusal or a verification wall ends it, so an ordinary page costs one
   request; at most two User-Agents are tried, under the one 8-second deadline, and the address is checked
   before each attempt and on every redirect (at most 3 per attempt).
 - A refusal (status 401, 403, 406, 429, 503) or a wall (a verification wall's words in the title,
   the description, the first lines or, for a short page, the first markup) goes on to the next
-  User-Agent. When all of them were walls the page is "blocked": it has no title and no text, and
+  User-Agent. A sign-in page is a wall too: an address that is, or redirects to, a sign-in address
+  (`/login`, `/signin`, a `passport.` host) is not asked for; and the words a sign-in page says
+  ("使用手机号或扫码登录", "Continue with Google" ...) count in the title and the description, and at
+  the top of a short page. When all of them were walls the page is "blocked": it has no title and no text, and
   the item keeps the title it had. A test read from this page says so.
 - A page that is only a shell is "thin": less than 60 characters of text; a WeChat article without
   its body (under 200 characters); or a column of buttons and menu lines. Its title is kept when it

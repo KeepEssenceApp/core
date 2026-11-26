@@ -304,3 +304,55 @@ describe("what is logged", () => {
     assert.deepEqual(s.logs.map((l) => [JSON.parse(l).result, JSON.parse(l).platform]), [["ok", "other"], ["wall", "wechat"]]);
   });
 });
+
+describe("QA #103: Xiaohongshu short links, and a sign-in page is not a page", () => {
+  const SIGN_IN = "http://www.rednote.com/login?redirectPath=http%3A%2F%2Fwww.xiaohongshu.com%2Fdiscovery%2Fitem%2F6aa2";
+  const LOGIN_LINES = ["登录", "使用 Google 账号登录", "Continue with Google", "使用 Apple 账号登录", "使用手机号或扫码登录", "登录即表示你同意用户协议和隐私政策"];
+  const loginPage = () => page("登录 - rednote - share, connect, love", LOGIN_LINES.map((l) => `<p>${l}</p>`).join(""));
+
+  it("a short link is asked for as a phone first, is followed to the note, and is logged as Xiaohongshu", async () => {
+    const s = await run({
+      "http://xhslink.cn/o/AbCd": () => redirect("http://www.xiaohongshu.com/discovery/item/6aa2"),
+      "http://www.xiaohongshu.com/discovery/item/6aa2": () => article("阳台上的薄荷"),
+    });
+    const r = await s.read("http://xhslink.cn/o/AbCd");
+    assert.equal(r.status, 200);
+    assert.deepEqual(docs(s).map((h) => `${h.ua} ${new URL(h.url).hostname}`), ["iphone xhslink.cn", "iphone www.xiaohongshu.com"]);
+    assert.equal(JSON.parse(s.logs.at(-1)!).platform, "xiaohongshu");
+  });
+
+  it("a note that the site sends on to its sign-in page is 422 'wall': the sign-in words are not content, the page is read as a phone and then a desktop, and it is logged as Xiaohongshu", async () => {
+    const s = await run({
+      "http://xhslink.cn/o/AbCd": () => redirect("http://www.xiaohongshu.com/discovery/item/6aa2"),
+      "http://www.xiaohongshu.com/discovery/item/6aa2": () => redirect(SIGN_IN),
+      [SIGN_IN]: () => loginPage(),
+    });
+    const r = await s.read("http://xhslink.cn/o/AbCd");
+    assert.equal(`${r.status} ${r.json.error}`, "422 wall");
+    assert.equal(r.json.data, undefined);
+    assert.ok(!JSON.stringify(r.json).includes("Continue with Google"));
+    assert.deepEqual([...new Set(docs(s).map((h) => h.ua))], ["iphone", "desktop"]);
+    assert.equal(JSON.parse(s.logs.at(-1)!).platform, "xiaohongshu");
+    assert.equal(JSON.parse(s.logs.at(-1)!).result, "wall");
+  });
+
+  it("a sign-in page at an ordinary address is a wall by what it says; a long article that explains such a button is read", async () => {
+    const s = await run({
+      "http://www.xiaohongshu.com/explore/6aa2": () => loginPage(),
+      "http://blog.example.org/oauth": () => page("OAuth in ten minutes", `<article><p>How to add a Continue with Google button to a site.</p>${`<p>${TEA}</p>`.repeat(6)}</article>`),
+    });
+    const wall = await s.read("http://www.xiaohongshu.com/explore/6aa2");
+    assert.equal(`${wall.status} ${wall.json.error}`, "422 wall");
+    const ok = await s.read("http://blog.example.org/oauth");
+    assert.equal(ok.status, 200);
+    assert.ok(ok.json.data.content.includes("Continue with Google"));
+  });
+
+  it("a page whose own data says it is a note is not taken for a sign-in page", async () => {
+    const note = { noteData: { data: { noteData: { title: "阳台上的薄荷", desc: "周末把阳台收拾了一遍，种了薄荷和罗勒，晚上泡了一杯薄荷茶。", user: { nickName: "某某的阳台" } } } } };
+    const s = await run({ "http://www.xiaohongshu.com/explore/ok": () => page("阳台上的薄荷 - rednote", `<div id="app"><p>${LOGIN_LINES.join("</p><p>")}</p></div><script>window.__INITIAL_STATE__ = ${JSON.stringify(note)};</script>`) });
+    const r = await s.read("http://www.xiaohongshu.com/explore/ok");
+    assert.equal(r.status, 200);
+    assert.ok(r.json.data.content.includes("种了薄荷和罗勒"));
+  });
+});

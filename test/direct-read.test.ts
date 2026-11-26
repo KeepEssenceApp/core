@@ -288,3 +288,70 @@ describe("QA #100: the address is checked before every attempt, and one deadline
     expect(secondEnded - started).toBeLessThan(300);
   });
 });
+
+describe("QA #103: a Xiaohongshu short link, and the sign-in page it can end on", () => {
+  const SIGN_IN = "https://www.rednote.com/login?redirectPath=https%3A%2F%2Fwww.xiaohongshu.com%2Fdiscovery%2Fitem%2F6aa2";
+  const LOGIN_LINES = ["登录", "使用 Google 账号登录", "Continue with Google", "使用 Apple 账号登录", "使用手机号或扫码登录", "登录即表示你同意用户协议和隐私政策"];
+  const loginPage = () => page("登录 - rednote - share, connect, love", LOGIN_LINES.map((l) => `<p>${l}</p>`).join(""), '<meta name="description" content="来小红书，和全世界最有趣的人做朋友">');
+
+  it("a short link is asked for as a phone first, and is counted as Xiaohongshu", async () => {
+    const asked: Ask[] = [];
+    const env = makeEnv({ OUTBOUND: asking(asked, () => article()) });
+    const ann = await signIn(env);
+    for (const short of ["https://xhslink.cn/o/AbCd", "http://xhslink.com/a/b"]) {
+      asked.length = 0;
+      await read(env, ann, short);
+      expect(`${short} ${asked[0]?.ua} ${asked.length}`).toBe(`${short} iphone 1`);
+    }
+    expect(await db(env, "SELECT platform, path, n FROM fetch_stats")).toEqual([{ platform: "xiaohongshu", path: "direct", n: 2 }]);
+  });
+
+  it("a short link that the site sends on to its sign-in page is 'not fetched': the sign-in page is not asked for, its words are not stored, and the item keeps its title", async () => {
+    const asked: Ask[] = [];
+    const env = makeEnv({
+      OUTBOUND: asking(asked, (url, ua) => {
+        if (url === "https://xhslink.cn/o/AbCd") return new Response(null, { status: 302, headers: { location: "https://www.xiaohongshu.com/discovery/item/6aa2" } });
+        if (url === "https://www.xiaohongshu.com/discovery/item/6aa2") return new Response(null, { status: 302, headers: { location: SIGN_IN } });
+        return loginPage();
+      }),
+    });
+    const ann = await signIn(env);
+    const shared = await read(env, ann, "https://xhslink.cn/o/AbCd", { title: "阳台上的薄荷" });
+    expect(shared.item).toMatchObject({ title: "阳台上的薄荷", content_unavailable: true });
+    expect(shared.body).toBe("");
+    // Nothing shared with it: the host name stands in, never the sign-in page's words.
+    const bare = await read(env, ann, "https://xhslink.cn/o/EfGh");
+    expect(bare.item).toMatchObject({ content_unavailable: true, title: "xhslink.cn" });
+    expect(bare.item.title).not.toContain("登录");
+    expect(asked.some((a) => a.url === SIGN_IN)).toBe(false);
+    // The phone first, then the desktop; both were sent to the sign-in page, and neither asked for it.
+    expect([...new Set(asked.map((a) => a.ua))]).toEqual(["iphone", "desktop"]);
+    expect(await db(env, "SELECT platform, path, n FROM fetch_stats")).toEqual([{ platform: "xiaohongshu", path: "none", n: 2 }]);
+  });
+
+  it("a sign-in page that is not at a sign-in address is still one, by what it says: it is not content, and its words are not the title", async () => {
+    const env = makeEnv({ OUTBOUND: asking([], () => loginPage()) });
+    const ann = await signIn(env);
+    const r = await read(env, ann, "https://www.xiaohongshu.com/explore/6aa2");
+    expect(r.item).toMatchObject({ content_unavailable: true, title: "xiaohongshu.com" });
+    expect(r.body).toBe("");
+    expect(r.item.title).not.toContain("Continue with Google");
+  });
+
+  it("the same explanation in a long article is read as an article", async () => {
+    const env = makeEnv({ OUTBOUND: asking([], () => page("OAuth in ten minutes", `<p>How to add a Continue with Google button to a site.</p>${`<p>${TEA}</p>`.repeat(6)}`)) });
+    const ann = await signIn(env);
+    const r = await read(env, ann, "https://blog.example.org/oauth");
+    expect(r.item).toMatchObject({ content_unavailable: false, title: "OAuth in ten minutes" });
+    expect(r.body).toContain("Continue with Google");
+  });
+
+  it("a link to a sign-in address that the user saved is not read either: there is nothing to read behind it", async () => {
+    const asked: Ask[] = [];
+    const env = makeEnv({ OUTBOUND: asking(asked, () => article()) });
+    const ann = await signIn(env);
+    const r = await read(env, ann, "https://example.org/login?next=%2Fa", { title: "My account page" });
+    expect(r.item).toMatchObject({ content_unavailable: true, title: "My account page" });
+    expect(asked).toEqual([]);
+  });
+});
