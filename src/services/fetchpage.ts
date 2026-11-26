@@ -6,7 +6,7 @@
 // apps), and a verification wall makes the next one go (pagerules.ts, QA #100).
 import { LIMITS, num, outbound, type Env } from "../env";
 import { truncate } from "../util";
-import { ACCEPT_LANGUAGE, assessPage, loginAddress, REFUSAL_STATUSES, userAgentsFor, wallHint, type Verdict } from "./pagerules";
+import { ACCEPT_LANGUAGE, assessPage, endedOnFrontPage, loginAddress, REFUSAL_STATUSES, userAgentsFor, wallHint, type Verdict } from "./pagerules";
 import { isPublicUrl } from "./publicurl";
 
 export { isPublicUrl };
@@ -174,6 +174,8 @@ async function attempt(env: Env, raw: string, ua: string, maxChars: number, dead
       if (!isPublicUrl(url)) return { kind: "none" };
       // A redirect to a sign-in page is the site asking for a login: the page is not given, so it is not asked for.
       if (loginAddress(url)) return { kind: "wall", reason: "sign-in page" };
+      // A link that runs out lands on the front page of the site, and the front page is not the page that was saved (QA #103).
+      if (endedOnFrontPage(raw, url)) return { kind: "none" };
       const response = await outbound(env, url, {
         redirect: "manual",
         signal: own.signal,

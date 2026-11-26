@@ -321,6 +321,17 @@ describe("QA #103: Xiaohongshu short links, and a sign-in page is not a page", (
     assert.equal(JSON.parse(s.logs.at(-1)!).platform, "xiaohongshu");
   });
 
+  it("a short link that has run out ends on the front page of the site: that is an error, and the feed on it is not content", async () => {
+    const feed = () => page("小红书 - 你的生活指南", `<div id="app">${["小红书 App", "你的生活指南", "打开看看", "热门笔记", TEA, TEA].map((l) => `<p>${l}</p>`).join("")}</div>`);
+    const s = await run({ "http://xhslink.cn/o/dead": () => redirect("http://www.xiaohongshu.com/"), "http://www.xiaohongshu.com/": () => feed() });
+    const r = await s.read("http://xhslink.cn/o/dead");
+    assert.equal(`${r.status} ${r.json.error}`, "502 error");
+    assert.equal(r.json.data, undefined);
+    assert.ok(!JSON.stringify(r.json).includes("热门笔记"));
+    // The front page, asked for as it is, is read as a page (nobody asked for a note).
+    assert.equal((await s.read("http://www.xiaohongshu.com/")).status, 200);
+  });
+
   it("a note that the site sends on to its sign-in page is 422 'wall': the sign-in words are not content, the page is read as a phone and then a desktop, and it is logged as Xiaohongshu", async () => {
     const s = await run({
       "http://xhslink.cn/o/AbCd": () => redirect("http://www.xiaohongshu.com/discovery/item/6aa2"),

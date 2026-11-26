@@ -1,6 +1,6 @@
 // QA #100: the rules the direct read judges a page by. Fabricated text only.
 import { describe, expect, it } from "vitest";
-import { assessPage, CAPTION_CHARS, LOGIN_HINTS, loginAddress, onDomain, THIN_CHARS, titleWins, usableTitle, userAgentsFor, UA_DESKTOP, UA_IPHONE, WALL_HINTS, wallHint, XIAOHONGSHU } from "../src/services/pagerules";
+import { assessPage, CAPTION_CHARS, endedOnFrontPage, LOGIN_HINTS, loginAddress, onDomain, THIN_CHARS, titleWins, usableTitle, userAgentsFor, UA_DESKTOP, UA_IPHONE, WALL_HINTS, wallHint, XIAOHONGSHU } from "../src/services/pagerules";
 
 const lines = (...l: string[]) => l.join("\n");
 const ARTICLE = "Steep green tea for two minutes in water of about eighty degrees, and taste it before the second cup, because the leaves give more each time they are steeped.";
@@ -180,5 +180,28 @@ describe("QA #103: Xiaohongshu short links, and a sign-in page is not a page", (
     expect(wallHint({ text: tutorial, title: "OAuth in ten minutes", description: "A small guide" })).toBeNull();
     // A page that says it is a login page is not content, whatever else it is long enough to be.
     expect(assessPage({ url: "https://www.rednote.com/x", text: login, wall: wallHint({ text: login }) })).toMatchObject({ quality: "blocked" });
+  });
+});
+
+describe("QA #103: a link that has run out ends on the front page", () => {
+  it("only a Xiaohongshu link that was asked for by something else and ended on the front page or the feed", () => {
+    const short = "https://xhslink.cn/o/AbCd";
+    for (const front of ["https://www.xiaohongshu.com/", "https://www.xiaohongshu.com", "https://www.xiaohongshu.com/explore", "https://www.rednote.com/explore/", "https://www.xiaohongshu.com/?source=web"]) {
+      expect(`${front} ${endedOnFrontPage(short, front)}`).toBe(`${front} true`);
+    }
+    // A note, a sign-in page, another site, or a link that was the front page to begin with.
+    for (const [asked, final] of [
+      [short, "https://www.xiaohongshu.com/discovery/item/6aa2"],
+      [short, "https://www.xiaohongshu.com/explore/6aa2"],
+      [short, "https://www.rednote.com/login?redirectPath=x"],
+      [short, "https://example.org/"],
+      ["https://example.org/a", "https://example.org/"],
+      ["https://www.xiaohongshu.com/", "https://www.xiaohongshu.com/"],
+      ["https://www.xiaohongshu.com/explore", "https://www.xiaohongshu.com/"],
+      ["not an address", "https://www.xiaohongshu.com/"],
+      [short, "not an address"],
+    ]) {
+      expect(`${asked} -> ${final} ${endedOnFrontPage(asked, final)}`).toBe(`${asked} -> ${final} false`);
+    }
   });
 });

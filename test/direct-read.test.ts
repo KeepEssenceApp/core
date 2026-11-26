@@ -346,6 +346,21 @@ describe("QA #103: a Xiaohongshu short link, and the sign-in page it can end on"
     expect(r.body).toContain("Continue with Google");
   });
 
+  it("a short link that has run out ends on the front page of the site: the front page is not asked for, its feed is not stored, the item keeps its title", async () => {
+    const asked: Ask[] = [];
+    const feed = () => page("小红书 - 你的生活指南", ["小红书 App", "你的生活指南", "打开看看", "热门笔记", `${TEA}`, `${TEA}`].map((l) => `<p>${l}</p>`).join(""));
+    const env = makeEnv({
+      OUTBOUND: asking(asked, (url) => (url.startsWith("https://xhslink.cn/o/dead") ? new Response(null, { status: 302, headers: { location: "https://www.xiaohongshu.com/" } }) : feed())),
+    });
+    const ann = await signIn(env);
+    const r = await read(env, ann, "https://xhslink.cn/o/dead", { title: "阳台上的薄荷" });
+    expect(r.item).toMatchObject({ title: "阳台上的薄荷", content_unavailable: true });
+    expect(r.body).toBe("");
+    expect(asked.some((a) => a.url === "https://www.xiaohongshu.com/")).toBe(false);
+    const bare = await read(env, ann, "https://xhslink.cn/o/dead2");
+    expect(bare.item).toMatchObject({ content_unavailable: true, title: "xhslink.cn" });
+  });
+
   it("a link to a sign-in address that the user saved is not read either: there is nothing to read behind it", async () => {
     const asked: Ask[] = [];
     const env = makeEnv({ OUTBOUND: asking(asked, () => article()) });
