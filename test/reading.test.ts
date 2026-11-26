@@ -456,6 +456,35 @@ describe("K17 calendar", () => {
     expect((await call(env, "GET", "/c/" + secret + ".png")).status).toBe(404);
   });
 
+  it("K17 calendar image: every day of the month has its dot, the days to come neutral grey with no mark, whatever today is (QA #15)", async () => {
+    const env = makeEnv();
+    const ann = await signIn(env);
+    await saveText(env, ann.token, "A day that has something saved.", "Marker");
+    const url = (await call(env, "PATCH", "/v1/settings", { token: ann.token, body: { calendar_image_enabled: true } })).json.calendar_image.url;
+    const cal = await get(env, ann.token, "/v1/calendar");
+    const future = cal.days.filter((d: any) => d.mark === "future").length;
+    // The test is only worth something on a day that has days after it.
+    expect(future).toBeGreaterThan(0);
+    for (const theme of ["light", "dark", "clear"]) {
+      // Without the numbers row, every circle is a day.
+      const svg = (await call(env, "GET", `${url}?theme=${theme}&counts=0`)).text;
+      const circles = svg.match(/<circle[^>]*>/g) ?? [];
+      expect(circles.length).toBe(cal.days.length);
+      const faint = circles.filter((c) => c.includes("fill-opacity"));
+      expect(faint.length).toBe(future);
+      // A day to come says nothing: a small dot filled with the neutral grey, no ring, no ink, no gold.
+      for (const c of faint) {
+        expect(c).toMatch(/r="[\d.]+" fill="#[0-9a-f]{6}" fill-opacity="0\.45"\/>$/);
+        expect(c).not.toMatch(/stroke|#b8892b|#d4a63a|#111111|#f2f2f2/);
+      }
+      // The days that have come are drawn as before: none of them is faint.
+      expect(circles.length - faint.length).toBe(cal.days.length - future);
+    }
+    // Twelve months: the days to come of the current month only.
+    const year = (await call(env, "GET", `${url}?range=year&counts=0`)).text;
+    expect(((year.match(/<circle[^>]*fill-opacity/g) ?? []).length)).toBe(future);
+  });
+
   it("K17 calendar image: dots and numbers only — no titles, no text, no identity", async () => {
     const env = makeEnv();
     const ann = await signIn(env, "ann.secret.name@example.com");
