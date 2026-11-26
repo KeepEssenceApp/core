@@ -7,7 +7,8 @@ import { localDay } from "../time";
 import type { AssistantRow, ItemRow, UserRow } from "../types";
 import { firstSentence, iso, looksLikeUrl, parseJson, shorten, truncate } from "../util";
 import { assetText, isTextType, type AssetRow } from "./assets";
-import { fetchPage, siteOf } from "./fetchpage";
+import { fetchContent } from "./fetchers";
+import { siteOf } from "./fetchpage";
 
 export const OPENING_CHARS = 500;
 
@@ -165,7 +166,21 @@ export async function liveItem(env: Env, userId: string, itemId: string): Promis
  * items whose first attempt never finished.
  */
 export async function fetchItemContent(env: Env, item: Pick<ItemRow, "id" | "user_id" | "url" | "title" | "title_from" | "body">): Promise<void> {
-  const page = item.url ? await fetchPage(env, item.url) : null;
+  const got = item.url ? await fetchContent(env, item.url) : null;
+  const page = got?.page ?? null;
+  if (page && got?.thin) {
+    // Only a shell came back (navigation words, a verification wall). Its title is worth keeping;
+    // its words are not content, and must not be analysed as if they were (QA #86).
+    const keep = item.title_from === "client" && item.title;
+    await env.DB.prepare(
+      `UPDATE items SET fetch_state = 'failed', title = ?, title_from = ?, site = COALESCE(NULLIF(?, ''), site),
+         content_unavailable = CASE WHEN body IS NULL OR body = '' THEN 1 ELSE 0 END
+       WHERE id = ? AND user_id = ? AND fetch_state = 'pending'`,
+    )
+      .bind(keep ? item.title : cleanTitle(page.title) || item.title, keep ? "client" : page.title ? "fetch" : item.title_from, page.site, item.id, item.user_id)
+      .run();
+    return;
+  }
   if (!page) {
     // Text the client already sent is content; only a link with nothing at all is "unavailable".
     await env.DB.prepare(

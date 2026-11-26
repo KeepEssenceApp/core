@@ -5,6 +5,8 @@
 // - No content: no title, body, address or text of an item, analysis, daily digest or note ever
 //   leaves through these routes. Only counts, times, and the names of devices and assistants.
 // - Few queries: every list is one aggregating statement or one batch, never a loop over users.
+import { loadFetchSettings, PROVIDERS, runProvider, saveFetchSettings, THIN_CHARS, validEndpoint, type FetchSettings, type ProviderId, type TestResult } from "../services/fetchers";
+import { isPublicUrl } from "../services/fetchpage";
 import { forwardingConfigured, type FeedbackRow } from "./feedback";
 import pkg from "../../package.json";
 import { DAY, now } from "../clock";
@@ -22,7 +24,7 @@ type Params = Record<string, string>;
 type AdminHandler = (env: Env, request: Request, params: Params) => Promise<Response>;
 
 export interface AdminRoute {
-  method: "GET" | "POST" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "DELETE";
   path: string;
   why: string;
   handler: AdminHandler;
@@ -125,7 +127,8 @@ type AuditAction =
   | "user.sign_out"
   | "user.device_revoke"
   | "user.delete"
-  | "user.delete_self";
+  | "user.delete_self"
+  | "fetch.settings";
 
 /** One audit entry written by the core. `detail` is built here from names and counts only: never a code or a credential. */
 function auditStatement(env: Env, action: AuditAction, target: string, detail = ""): D1PreparedStatement {
@@ -169,6 +172,99 @@ const listAudit: AdminHandler = async (env, request) => {
     entries: page.map(auditView),
     next_cursor: rows.results.length > limit ? encodeCursor(String(page[page.length - 1].seq)) : null,
   });
+};
+
+// ---------------------------------------------------------------- reading saved links
+
+const STATS_DAYS = 7;
+
+/** What the portal shows: every setting except the keys themselves (only whether one is set, and its last four characters). */
+async function fetchView(env: Env, s: FetchSettings) {
+  const since = new Date(now() - (STATS_DAYS - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const rows = await env.DB.prepare("SELECT platform, path, SUM(n) AS n FROM fetch_stats WHERE day >= ? GROUP BY platform, path ORDER BY platform, path")
+    .bind(since)
+    .all<{ platform: string; path: string; n: number }>();
+  const provider = (id: "jina" | "firecrawl") => ({
+    enabled: s[id].enabled,
+    endpoint: s[id].endpoint,
+    key_set: s[id].key !== "",
+    key_hint: s[id].key.length >= 12 ? `…${s[id].key.slice(-4)}` : "",
+  });
+  const test = (id: ProviderId) => {
+    const r = s.tests[id];
+    return r ? { at: iso(r.at), url_host: r.url_host, ok: r.ok, chars: r.chars, ms: r.ms, error: r.error } : null;
+  };
+  return {
+    order: s.order,
+    jina: provider("jina"),
+    firecrawl: provider("firecrawl"),
+    tests: { direct: test("direct"), jina: test("jina"), firecrawl: test("firecrawl") },
+    stats: { days: STATS_DAYS, rows: rows.results },
+  };
+}
+
+const getFetch: AdminHandler = async (env) => json(await fetchView(env, await loadFetchSettings(env)));
+
+/** Changes take effect at the next link that is read. A key is write-only: sent to set it, `""` to clear it, left out to keep it. */
+const putFetch: AdminHandler = async (env, request) => {
+  const b = (await readBody(request)) as { order?: unknown; jina?: Record<string, unknown>; firecrawl?: Record<string, unknown> };
+  const s = await loadFetchSettings(env);
+  const bad = (zh: string, en: string) => err("bad_request", zh, en);
+  if (b.order !== undefined) {
+    const order = b.order;
+    if (!Array.isArray(order) || order.length !== PROVIDERS.length || !PROVIDERS.every((p) => order.includes(p))) throw bad("顺序要正好包含三种方式各一次。", "The order must name each of the three ways exactly once.");
+    s.order = order as ProviderId[];
+  }
+  const changed: string[] = [];
+  for (const id of ["jina", "firecrawl"] as const) {
+    const p = b[id];
+    if (p === undefined) continue;
+    if (typeof p !== "object" || p === null) throw bad("格式不对。", "Malformed.");
+    if (p.enabled !== undefined) {
+      if (typeof p.enabled !== "boolean") throw bad("格式不对。", "Malformed.");
+      if (p.enabled !== s[id].enabled) changed.push(`${id} ${p.enabled ? "on" : "off"}`);
+      s[id].enabled = p.enabled;
+    }
+    if (p.endpoint !== undefined) {
+      if (typeof p.endpoint !== "string" || p.endpoint.length > 300 || !validEndpoint(p.endpoint.trim())) throw bad("地址要以 https:// 开头，不带账号、参数。", "The address must start with https:// and hold no credentials or query.");
+      if (p.endpoint.trim() !== s[id].endpoint) changed.push(`${id} endpoint`);
+      s[id].endpoint = p.endpoint.trim();
+    }
+    if (p.key !== undefined) {
+      if (typeof p.key !== "string" || p.key.length > 400) throw bad("格式不对。", "Malformed.");
+      if (p.key.trim() !== s[id].key) changed.push(`${id} key ${p.key.trim() ? "set" : "cleared"}`);
+      s[id].key = p.key.trim();
+    }
+  }
+  if (b.order !== undefined) changed.push(`order ${s.order.join(" > ")}`);
+  await saveFetchSettings(env, s);
+  if (changed.length) await auditStatement(env, "fetch.settings", "fetch", changed.join("; ")).run();
+  return json(await fetchView(env, s));
+};
+
+/** Reads one address with one way, now, and remembers how it went (never what it read). */
+const testFetch: AdminHandler = async (env, request) => {
+  const b = (await readBody(request)) as { provider?: unknown; url?: unknown };
+  if (typeof b.provider !== "string" || !PROVIDERS.includes(b.provider as ProviderId) || typeof b.url !== "string" || !isPublicUrl(b.url)) {
+    throw err("bad_request", "要给一种方式和一个公开的网址。", "Give one of the ways and a public address.");
+  }
+  const id = b.provider as ProviderId;
+  const s = await loadFetchSettings(env);
+  const started = Date.now();
+  let result: TestResult;
+  let title = "";
+  try {
+    const page = await runProvider(env, id, s, b.url);
+    title = page.title;
+    const chars = page.text.replace(/\s+/g, "").length;
+    result = { at: now(), url_host: new URL(b.url).hostname, ok: chars >= THIN_CHARS, chars, ms: Date.now() - started, error: chars >= THIN_CHARS ? "" : "only a page shell came back" };
+  } catch (e) {
+    result = { at: now(), url_host: new URL(b.url).hostname, ok: false, chars: 0, ms: Date.now() - started, error: e instanceof Error ? e.message.slice(0, 200) : "failed" };
+  }
+  const latest = await loadFetchSettings(env);
+  latest.tests[id] = result;
+  await saveFetchSettings(env, latest);
+  return json({ provider: id, ok: result.ok, chars: result.chars, ms: result.ms, error: result.error, title: title.slice(0, 200) });
 };
 
 // ---------------------------------------------------------------- feedback
@@ -716,6 +812,9 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "DELETE", path: "/admin/users/{id}/devices/{device_id}", why: "operator: revoke one client device", handler: revokeUserDevice },
   { method: "DELETE", path: "/admin/users/{id}", why: "operator: delete an account and all its data", handler: deleteUser },
   { method: "GET", path: "/admin/usage", why: "operator: what the built-in assistants used", handler: getUsage },
+  { method: "GET", path: "/admin/fetch", why: "operator: how saved links are read, and how it went", handler: getFetch },
+  { method: "PUT", path: "/admin/fetch", why: "operator: turn the ways of reading links on and off, and order them", handler: putFetch },
+  { method: "POST", path: "/admin/fetch/test", why: "operator: read one address with one way, now", handler: testFetch },
   { method: "GET", path: "/admin/feedback", why: "operator: what users wrote to the operator", handler: listFeedback },
   { method: "GET", path: "/admin/audit", why: "operator: the audit log", handler: listAudit },
   { method: "POST", path: "/admin/audit", why: "operator: an audit entry for something the portal did itself", handler: addAudit },

@@ -122,6 +122,40 @@ Built-in assistants only; `top_users` holds at most 20, by total tokens. `days` 
 UTC day, oldest first, ending today, with zeros for days without usage. 400 when `days` is not an
 integer from 1 to 90.
 
+## Reading saved links
+
+How the content of a saved link is read. The ways are tried in `order`; the first that brings back
+real content (at least 60 characters of text) is used. `direct` is the core fetching the page
+itself and cannot be turned off. `jina` (Jina Reader, or a self-hosted reader with the same
+interface) and `firecrawl` (Firecrawl, or a self-hosted one) are off until turned on here; turning
+one on sends the address of every link a user saves to that service. A page that is only a shell
+keeps its title and is marked "content could not be fetched", so its few words are never analysed.
+
+- `GET /admin/fetch` →
+
+```json
+{ "order": ["direct", "jina", "firecrawl"],
+  "jina": { "enabled": false, "endpoint": "", "key_set": false, "key_hint": "" },
+  "firecrawl": { "enabled": false, "endpoint": "", "key_set": false, "key_hint": "" },
+  "tests": { "direct": null, "jina": null, "firecrawl": { "at": "…", "url_host": "…", "ok": false, "chars": 0, "ms": 0, "error": "…" } },
+  "stats": { "days": 7, "rows": [{ "platform": "wechat", "path": "none", "n": 3 }] } }
+```
+
+- `PUT /admin/fetch` with any of `order` (all three ways, each once), `jina`, `firecrawl`
+  (`enabled`, `endpoint`, `key`) → 200 with the same body as the GET. An `endpoint` is empty (the
+  public service) or an `https://` address without credentials or a query. A `key` is write-only:
+  send it to set it, `""` to remove it, leave it out to keep it. It is never returned (only
+  `key_set` and its last four characters) and never written to the audit log. Changes apply to the
+  next link that is read; nothing is redeployed. Recorded as `fetch.settings`.
+- `POST /admin/fetch/test` with `{ "provider": "direct|jina|firecrawl", "url": "https://…" }` →
+  200 `{ "provider", "ok", "chars", "ms", "error", "title" }`. Reads the address once with that
+  way, on or off. Only how it went is kept (in `tests`), never what was read. 400 for an address
+  that is not public.
+
+`stats` are counts over the last 7 days by `platform` (`wechat`, `xiaohongshu`, `other`: a short
+fixed list, never an address) and by the way that read it (`none`: no way could). The settings,
+keys included, are stored in D1 (`core_state`, key `fetch.settings`).
+
 ## Feedback
 
 `GET /admin/feedback?cursor=&limit=` →

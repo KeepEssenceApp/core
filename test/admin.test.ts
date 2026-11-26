@@ -43,7 +43,7 @@ describe("admin guard", () => {
   it("admin guard: every admin route refuses a missing or wrong secret with 401, and answers 404 when no secret is configured", async () => {
     const env = makeEnv();
     const off = makeEnv({ ADMIN_SECRET: undefined });
-    expect(ADMIN_ROUTES.length).toBe(16);
+    expect(ADMIN_ROUTES.length).toBe(19);
     for (const route of ADMIN_ROUTES) {
       const path = route.path.replace("{id}", "usr_x").replace("{device_id}", "dev_x");
       const body = route.method === "GET" ? undefined : { email: "a@b.co" };
@@ -644,7 +644,7 @@ describe("admin: no content", () => {
     // Feedback is left out on purpose: it is what a user wrote to the operator, and it is the one
     // list that shows a user's own words. It holds nothing of an item, analysis, digest or note.
     const gets = ADMIN_ROUTES.filter((r) => r.method === "GET" && r.path !== "/admin/feedback").map((r) => r.path.replace("{id}", ann.userId));
-    expect(gets.sort()).toEqual(["/admin/audit", "/admin/invites", "/admin/overview", "/admin/usage", "/admin/users", `/admin/users/${ann.userId}`]);
+    expect(gets.sort()).toEqual(["/admin/audit", "/admin/fetch", "/admin/invites", "/admin/overview", "/admin/usage", "/admin/users", `/admin/users/${ann.userId}`]);
     for (const path of [...gets, "/admin/users?q=ann&status=active&limit=200", "/admin/usage?days=90", "/admin/audit?limit=200"]) {
       keep(await admin(env, "GET", path), 200);
     }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { advance, DAY } from "../src/clock";
 import { runMinute } from "../src/cron";
 import { isPublicUrl } from "../src/services/fetchpage";
-import { call, connectDevice, db, idem, makeEnv, signIn, type Outbound } from "./helpers";
+import { ADMIN, call, connectDevice, db, idem, makeEnv, signIn, type Outbound } from "./helpers";
 
 const html = (title: string, body: string, extra = "") =>
   new Response(`<html><head><title>${title}</title>${extra}</head><body><nav><p>Menu Home About</p></nav><article><h1>${title}</h1>${body}</article><script>var x = "junk";</script></body></html>`, {
@@ -164,7 +164,7 @@ describe("K6 page fetch", () => {
     const r = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url: "https://example.org/0" }, idem: idem() });
     expect(seen).toHaveLength(4);
     expect((await call(env, "GET", `/v1/items/${r.json.item_id}`, { token: ann.token })).json.content_unavailable).toBe(true);
-    const ok = makeEnv({ OUTBOUND: pages({ "https://example.org/1": hop(2), "https://example.org/2": hop(3), "https://example.org/3": hop(4), "https://example.org/4": () => html("End", "<p>The end of the road.</p>") }) });
+    const ok = makeEnv({ OUTBOUND: pages({ "https://example.org/1": hop(2), "https://example.org/2": hop(3), "https://example.org/3": hop(4), "https://example.org/4": () => html("End", "<p>The end of the road, reached after three redirects and not one more than that.</p>") }) });
     const r2 = await call(ok, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url: "https://example.org/1" }, idem: idem() });
     expect((await call(ok, "GET", `/v1/items/${r2.json.item_id}`, { token: ann.token })).json).toMatchObject({ title: "End", content_unavailable: false });
   });
@@ -213,7 +213,7 @@ describe("K6 page fetch", () => {
   });
 
   it("K6 page fetch: an item whose fetch never finished is picked up by cron", async () => {
-    const env = makeEnv({ OUTBOUND: pages({ "https://example.org/late": () => html("Late page", "<p>Arrived late.</p>") }) });
+    const env = makeEnv({ OUTBOUND: pages({ "https://example.org/late": () => html("Late page", "<p>Arrived late, long after the request that saved the link had been answered.</p>") }) });
     const ann = await signIn(env);
     const r = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url: "https://example.org/late" }, idem: idem() });
     // Pretend the request ended before the fetch did.
@@ -221,5 +221,79 @@ describe("K6 page fetch", () => {
     advance(61_000);
     await runMinute(env);
     expect((await call(env, "GET", `/v1/items/${r.json.item_id}`, { token: ann.token })).json).toMatchObject({ title: "Late page", content_unavailable: false });
+  });
+});
+
+describe("QA #85–#87: the ways a link's content is read", () => {
+  const SHELL = () => html("一个家最好的状态 - rednote", "<p>Explore</p><p>Post</p><p>Notifications</p>");
+  const LONG = "这是一篇足够长的正文，用来确认读到的是内容而不是页面的外壳。".repeat(4);
+  const admin = (env: any, method: string, path: string, body?: unknown) => call(env, method, path, { token: ADMIN, body });
+
+  it("a page that is only a shell keeps its title, and its words are not taken for content", async () => {
+    const env = makeEnv({ OUTBOUND: pages({ "https://www.xiaohongshu.com/explore/1": SHELL }) });
+    const ann = await signIn(env);
+    const r = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url: "https://www.xiaohongshu.com/explore/1" }, idem: idem() });
+    const item = (await call(env, "GET", `/v1/items/${r.json.item_id}`, { token: ann.token })).json;
+    expect(item).toMatchObject({ title: "一个家最好的状态 - rednote", content_unavailable: true });
+    expect((await db(env, "SELECT body FROM items WHERE id = ?", r.json.item_id))[0].body ?? "").toBe("");
+    expect(await db(env, "SELECT platform, path, n FROM fetch_stats")).toEqual([{ platform: "xiaohongshu", path: "none", n: 1 }]);
+  });
+
+  it("a reader service is not asked until the operator turns it on; then it is asked after the direct way fails", async () => {
+    const asked: { url: string; auth: string | undefined }[] = [];
+    const outbound: Outbound = async (url, init) => {
+      if (url.startsWith("https://r.jina.ai/")) {
+        asked.push({ url, auth: (init?.headers as any)?.authorization });
+        return Response.json({ data: { title: "人工智能全球治理", content: LONG } });
+      }
+      return new Response("verify", { status: 403 });
+    };
+    const env = makeEnv({ OUTBOUND: outbound });
+    const ann = await signIn(env);
+    const url = "https://mp.weixin.qq.com/s?__biz=abc&mid=1";
+    const first = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url }, idem: idem() });
+    expect(asked).toHaveLength(0);
+    expect((await call(env, "GET", `/v1/items/${first.json.item_id}`, { token: ann.token })).json.content_unavailable).toBe(true);
+
+    const put = await admin(env, "PUT", "/admin/fetch", { jina: { enabled: true, key: "aaaaaaaaaaaa1234" } });
+    expect(put.status).toBe(200);
+    expect(put.json.jina).toEqual({ enabled: true, endpoint: "", key_set: true, key_hint: "…1234" });
+    expect(put.text).not.toContain("aaaaaaaaaaaa");
+    const second = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url: url + "&x=2" }, idem: idem() });
+    expect(asked).toEqual([{ url: `https://r.jina.ai/${url}&x=2`, auth: "Bearer aaaaaaaaaaaa1234" }]);
+    expect((await call(env, "GET", `/v1/items/${second.json.item_id}`, { token: ann.token })).json).toMatchObject({ title: "人工智能全球治理", content_unavailable: false });
+    const view = (await admin(env, "GET", "/admin/fetch")).json;
+    expect(view.stats.rows).toEqual([{ platform: "wechat", path: "jina", n: 1 }, { platform: "wechat", path: "none", n: 1 }]);
+    // The key never comes back, and the audit entry does not hold it.
+    expect(JSON.stringify(view)).not.toContain("aaaaaaaaaaaa");
+    expect((await admin(env, "GET", "/admin/audit")).text).not.toContain("aaaaaaaaaaaa");
+    expect((await admin(env, "GET", "/admin/audit")).json.entries[0]).toMatchObject({ action: "fetch.settings", detail: "jina on; jina key set" });
+  });
+
+  it("the order can be changed, the settings are checked, and a test read says how it went without keeping what it read", async () => {
+    const outbound: Outbound = async (url) => {
+      if (url === "https://api.firecrawl.dev/v1/scrape") return Response.json({ success: true, data: { markdown: LONG, metadata: { title: "From firecrawl" } } });
+      if (url.startsWith("https://reader.example.net/")) return Response.json({ data: { title: "", content: "short" } });
+      return html("Direct", `<p>${LONG}</p>`);
+    };
+    const env = makeEnv({ OUTBOUND: outbound });
+    expect((await admin(env, "PUT", "/admin/fetch", { order: ["firecrawl", "direct"] })).status).toBe(400);
+    expect((await admin(env, "PUT", "/admin/fetch", { jina: { endpoint: "http://reader.example.net" } })).status).toBe(400);
+    expect((await admin(env, "PUT", "/admin/fetch", { jina: { endpoint: "https://user:pw@reader.example.net" } })).status).toBe(400);
+    const set = await admin(env, "PUT", "/admin/fetch", { order: ["firecrawl", "jina", "direct"], firecrawl: { enabled: true }, jina: { enabled: true, endpoint: "https://reader.example.net/" } });
+    expect(set.json.order).toEqual(["firecrawl", "jina", "direct"]);
+    const ann = await signIn(env);
+    const r = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url: "https://example.org/a" }, idem: idem() });
+    expect((await call(env, "GET", `/v1/items/${r.json.item_id}`, { token: ann.token })).json.title).toBe("From firecrawl");
+
+    const bad = await admin(env, "POST", "/admin/fetch/test", { provider: "jina", url: "https://example.org/a" });
+    expect(bad.json).toMatchObject({ provider: "jina", ok: false, chars: 5, error: "only a page shell came back" });
+    const good = await admin(env, "POST", "/admin/fetch/test", { provider: "direct", url: "https://example.org/a" });
+    expect(good.json).toMatchObject({ provider: "direct", ok: true, title: "Direct" });
+    expect((await admin(env, "POST", "/admin/fetch/test", { provider: "direct", url: "http://127.0.0.1/x" })).status).toBe(400);
+    const view = (await admin(env, "GET", "/admin/fetch")).json;
+    expect(view.tests.jina).toMatchObject({ ok: false, url_host: "example.org" });
+    expect(view.tests.direct).toMatchObject({ ok: true, url_host: "example.org" });
+    expect(JSON.stringify(view)).not.toContain(LONG.slice(0, 12));
   });
 });
