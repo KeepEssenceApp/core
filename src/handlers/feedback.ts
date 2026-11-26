@@ -4,6 +4,7 @@ import { now } from "../clock";
 import { LIMITS, outbound, type Env } from "../env";
 import { err } from "../errors";
 import { rateLimit } from "../services/guard";
+import { foundSentence, noFound, redact, type Kind } from "../services/redact";
 import { ok, type Handler, type UserRow } from "../types";
 import { newId } from "../util";
 
@@ -59,16 +60,42 @@ const HEAD: Record<string, [string, string, string, string]> = {
   en: ["Where", "What I was doing", "What went wrong", "How I would like it to be"],
 };
 
-/** The issue as the tracker gets it. The title is the first line of what went wrong. */
+/**
+ * The issue as the tracker gets it. The title is the first line of what went wrong.
+ *
+ * The tracker is not private to the operator, so what the user typed goes there with emails, phone
+ * numbers and anything that looks like a credential masked (QA #78), and the sender is not named:
+ * the feedback id is the link, and the operator reads the original and the sender in the portal.
+ */
 export function issueOf(r: FeedbackRow): { title: string; body: string; labels: string[] } {
-  const first = r.wrong.split(/\r?\n/)[0].trim();
-  const title = `[${r.place}] ${first.length > 80 ? first.slice(0, 79) + "…" : first}`;
+  const found = noFound();
+  const clean = (text: string) => {
+    // The sender's own address is masked wherever it still shows, however it was written.
+    const out = redact(text, [r.email]);
+    for (const k of Object.keys(found) as Kind[]) found[k] += out.found[k];
+    return out.text;
+  };
+  const place = clean(r.place);
+  const doing = clean(r.doing);
+  const wrong = clean(r.wrong);
+  const wish = clean(r.wish);
+  // Masked first, shortened after: a cut in the middle of a credential would leave a part of it.
+  const first = wrong.split(/\r?\n/)[0].trim();
+  const title = `[${place}] ${first.length > 80 ? first.slice(0, 79) + "…" : first}`;
   const h = HEAD[r.lang] ?? HEAD.en;
   const part = (name: string, text: string) => (text ? `### ${name}\n\n${text}\n\n` : "");
+  const masked = foundSentence(found);
   const body =
-    part(h[0], r.place) + part(h[1], r.doing) + part(h[2], r.wrong) + part(h[3], r.wish) +
-    `---\nFrom ${r.email} · ${new Date(r.created_at).toISOString()} · client: ${r.client || "?"} · feedback id: ${r.id}\nSent from inside the app.`;
+    part(h[0], place) + part(h[1], doing) + part(h[2], wrong) + part(h[3], wish) +
+    `---\nfeedback id: ${r.id} · ${new Date(r.created_at).toISOString()} · client: ${r.client || "?"}\nSent from inside the app. The sender is in the portal under this feedback id.` +
+    (masked ? `\nMasked in this text: ${masked}. The original is in the portal.` : "");
   return { title, body, labels: ["feedback", "in-app"] };
+}
+
+/** Why a request to the tracker failed, in words that carry no user text, address or credential. */
+function whyFailed(env: Env, e: unknown): string {
+  const message = e instanceof Error ? e.message : "";
+  return redact(message, [env.FEEDBACK_GITHUB_TOKEN]).text.slice(0, 200) || "request failed";
 }
 
 /** Passes one entry on. Records where it went, or why it did not go. */
@@ -97,7 +124,7 @@ export async function forwardOne(env: Env, id: string): Promise<boolean> {
       problem = "no address in the answer";
     } else problem = `status ${res.status}`;
   } catch (e) {
-    problem = e instanceof Error ? e.message.slice(0, 200) : "request failed";
+    problem = whyFailed(env, e);
   }
   await env.DB.prepare("UPDATE feedback SET forward_attempts = forward_attempts + 1, forward_error = ? WHERE id = ?").bind(problem, id).run();
   return false;

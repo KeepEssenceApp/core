@@ -171,8 +171,14 @@ What users sent with `POST /v1/feedback`, newest first. `forwarding` is the repo
 (`owner/name`) each entry is also filed in as an issue, or `null` when `FEEDBACK_GITHUB_REPO` and
 `FEEDBACK_GITHUB_TOKEN` are not both set. `issue_url` is the issue once it exists; until then
 `forward_error` says why the last attempt failed. An entry is tried when it arrives and then by the
-minute job, five times at most. The issue carries the sender's email, so the repository should be
-private. Deleting an account deletes its feedback here; an issue already filed stays where it is.
+minute job, five times at most. The issue does not name the sender: it carries the `feedback id`,
+and the sender and the original text are read here in the portal. What the user typed goes into
+the issue with emails, phone numbers and anything that looks like a credential (`sk-…`, `ghp_…`,
+`Bearer …`, key blocks, `password: …`) masked, in the title as well, and a last line says how many
+were masked. `forward_error` is a status or a short reason with the same masking, and nothing of the
+text is logged. The masking errs on the side of masking, and it cannot know every secret: a
+repository that is read by people outside the operator's team is still the wrong place for it.
+Deleting an account deletes its feedback here; an issue already filed stays where it is.
 `config.feedback_forwarding` in the overview says whether forwarding is on.
 
 ## Audit log
