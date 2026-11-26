@@ -91,6 +91,24 @@ export function loginAddress(raw: string): boolean {
   return first === "login" || first === "signin" || first === "sign-in" || first === "sign_in" || url.hostname.toLowerCase().startsWith("passport.");
 }
 
+/**
+ * A Xiaohongshu link that was followed to the front of the site (its home page or its feed): the note is gone, or the
+ * short link has run out, and the site shows its front page instead. What it says (a feed of other people's notes) is not
+ * the note, so it is not content. An address that is itself the front page is not asked about.
+ */
+export function endedOnFrontPage(asked: string, final: string): boolean {
+  if (!onDomain(hostOf(final), XIAOHONGSHU)) return false;
+  const front = (raw: string): boolean | null => {
+    try {
+      const path = new URL(raw).pathname.replace(/\/+$/, "");
+      return path === "" || path === "/explore";
+    } catch {
+      return null;
+    }
+  };
+  return front(final) === true && front(asked) === false;
+}
+
 const WALL_TEXT_HEAD = 600;
 const WALL_HTML_HEAD = 20000;
 /** Below this much text the page is short enough that a wall word anywhere in its first markup counts. */

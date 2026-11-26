@@ -6,7 +6,7 @@
 // post with nothing written is still a video post. What is said in the video is a job (jobs.ts) that the answer
 // names; a video that cannot be read is said so ("too_long", "unavailable") and never turns the page's own text
 // into a failure.
-import { assessPage, hostOf, loginAddress, onDomain, REFUSAL_STATUSES, usableTitle, userAgentsFor, wallHint, XIAOHONGSHU } from "../../src/services/pagerules.ts";
+import { assessPage, endedOnFrontPage, hostOf, loginAddress, onDomain, REFUSAL_STATUSES, usableTitle, userAgentsFor, wallHint, XIAOHONGSHU } from "../../src/services/pagerules.ts";
 import { isPublicUrl } from "../../src/services/publicurl.ts";
 import type { Config } from "./config.ts";
 import { videoByAddress, videoInFrames, videoOfNote, type VideoRef } from "./detect.ts";
@@ -82,6 +82,11 @@ export async function readUrl(renderer: Pick<Renderer, "render">, cfg: Config, u
       }
       if (got.status >= 400 || got.status === 0) {
         failure = { ok: false, kind: "error", message: `status ${got.status}` };
+        break;
+      }
+      // A link that has run out ends on the front page of the site: that is not the page that was saved.
+      if (endedOnFrontPage(url, got.finalUrl)) {
+        failure = { ok: false, kind: "error", message: "the link led to the front page of the site" };
         break;
       }
       // A page whose own data says it is a video note is not a wall: the data is the post's. A note's own data is what is
