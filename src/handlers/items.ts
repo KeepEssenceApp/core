@@ -6,6 +6,7 @@ import { NO_CONTENT, ok, type Cx, type Handler, type ItemRow, type Result } from
 import { decodeCursor, encodeCursor, firstSentence, iso, newId, parseJson, sha256Hex, truncate } from "../util";
 import { listAssistants } from "../services/accounts";
 import { assetText, deleteIfUnreferenced, isTextType, refStatement, type AssetRow } from "../services/assets";
+import { cancelJob } from "../services/fetchers";
 import { idempotent, rateLimit } from "../services/guard";
 import {
   bodyMaxChars,
@@ -179,10 +180,10 @@ export const searchItems: Handler = async (cx) => {
 
 async function detail(cx: Cx, id: string) {
   const [row, tags] = await cx.env.DB.batch<any>([
-    cx.env.DB.prepare(`SELECT ${ITEM_SELECT}, i.body ${ITEM_FROM} WHERE i.user_id = ? AND i.id = ? AND i.archived_at IS NULL`).bind(cx.user!.id, id),
+    cx.env.DB.prepare(`SELECT ${ITEM_SELECT}, i.body, i.recognized_text ${ITEM_FROM} WHERE i.user_id = ? AND i.id = ? AND i.archived_at IS NULL`).bind(cx.user!.id, id),
     cx.env.DB.prepare("SELECT kind, value, set_by FROM item_tags WHERE user_id = ? AND item_id = ? ORDER BY kind").bind(cx.user!.id, id),
   ]);
-  const item = row.results[0] as (ItemJoined & { body: string | null }) | undefined;
+  const item = row.results[0] as (ItemJoined & { body: string | null; recognized_text: string | null }) | undefined;
   if (!item) throw err("not_found");
   const n = await names(cx);
   // Who decided each value: the user, the sorting step, or nobody yet (the default stands).
@@ -195,6 +196,8 @@ async function detail(cx: Cx, id: string) {
     retention_set_by: item.pinned ? "user" : setBy("expiry"),
     assistant_set_by: setBy("assistant"),
     body: item.body,
+    // Recognized from the video's sound, never the author's words: shown apart from the body.
+    recognized_text: item.recognized_text ?? null,
     asset_id: item.asset_id,
     // A kept item has no end date, so its expiry tag does not apply and is not listed (QA #7).
     tags: (tags.results as { kind: string; value: string; set_by: string }[])
@@ -312,6 +315,12 @@ export const deleteItem: Handler = async (cx) => {
     if (item.asset_id) statements.push(refStatement(cx.env, cx.user!.id, item.asset_id, -1));
     await cx.env.DB.batch(statements);
     if (item.asset_id) await deleteIfUnreferenced(cx.env, cx.user!.id, item.asset_id);
+    // The row is gone, so the minute job could never find the job again: the runner is told now.
+    if (item.fetch_job) {
+      const cancel = cancelJob(cx.env, item.fetch_job);
+      if (cx.exec) cx.exec.waitUntil(cancel);
+      else await cancel;
+    }
   } else {
     // The copy is kept out of sight and cleaned up later by archive_retention_days.
     await cx.env.DB.batch([

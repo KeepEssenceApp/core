@@ -25,7 +25,7 @@ const CONTENTS: Record<Lang, { included: string[]; not_included: string[]; files
       "Your settings: rules, the choices for how long items are kept, notifications, time zone, language, and which assistant does which step.",
       "Every daily digest.",
       "Every note, with its sources and the item or daily digest it came from.",
-      "Every item that still exists, with its text, its analysis and its tags.",
+      "Every item that still exists, with its text (and, for a video, the recognized text), its analysis and its tags.",
       "A list of your files: name, type and size.",
     ],
     not_included: [
@@ -40,7 +40,7 @@ const CONTENTS: Record<Lang, { included: string[]; not_included: string[]; files
       "你的各项选择：规则、保留期限的选项、通知、时区、语言，以及哪只助手做哪一步。",
       "每一份每日摘要。",
       "每一篇笔记，连同它的出处和它来自的条目或每日摘要。",
-      "每一条还在的条目，连同原文、解读和标签。",
+      "每一条还在的条目，连同原文（有视频的，还有识别出来的文字）、解读和标签。",
       "你的文件清单：名称、类型和大小。",
     ],
     not_included: ["已经删除的条目，不论是你删的还是到期删的。", "文件本身的内容（图片、PDF 和其他附件）。", "设备、助手的凭据和用量数字。"],
@@ -65,7 +65,7 @@ interface ExportFile {
   size: number;
 }
 
-type ExportItemRow = ItemJoined & { body: string | null; f_bytes: number | null; f_type: string | null };
+type ExportItemRow = ItemJoined & { body: string | null; recognized_text: string | null; f_bytes: number | null; f_type: string | null };
 
 /**
  * The document, piece by piece. Each table is read a page at a time by its own key (never by
@@ -154,7 +154,7 @@ async function* exportParts(cx: Cx): AsyncGenerator<string> {
     const page = "SELECT id FROM items WHERE user_id = ?1 AND archived_at IS NULL AND (created_at, id) > (?2, ?3) ORDER BY created_at, id LIMIT ?4";
     const [items, tags] = await env.DB.batch<any>([
       env.DB.prepare(
-        `SELECT ${ITEM_SELECT}, i.body, f.bytes AS f_bytes, f.content_type AS f_type ${ITEM_FROM}
+        `SELECT ${ITEM_SELECT}, i.body, i.recognized_text, f.bytes AS f_bytes, f.content_type AS f_type ${ITEM_FROM}
          LEFT JOIN assets f ON f.id = i.asset_id AND f.user_id = i.user_id AND f.status = 'stored'
          WHERE i.user_id = ?1 AND i.archived_at IS NULL AND (i.created_at, i.id) > (?2, ?3) ORDER BY i.created_at, i.id LIMIT ?4`,
       ).bind(user.id, at, id, ITEM_PAGE),
@@ -178,6 +178,7 @@ async function* exportParts(cx: Cx): AsyncGenerator<string> {
         retention_set_by: r.pinned ? "user" : setBy("expiry"),
         assistant_set_by: setBy("assistant"),
         body: r.body,
+        recognized_text: r.recognized_text ?? null,
         asset_id: r.asset_id,
         // As on the item itself: a kept item has no end date, so no expiry tag is listed.
         tags: (tagsOf.get(r.id) ?? []).filter((t) => !(r.pinned && t.kind === "expiry")).map((t) => `${t.kind}:${t.kind === "assistant" ? (names.get(t.value) ?? t.value) : t.value}`),

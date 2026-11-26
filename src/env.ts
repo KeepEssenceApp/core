@@ -59,6 +59,8 @@ export const LIMITS = CONTRACT.limits as {
   triage_per_user_per_day: number;
   triage_default_after_minutes: number;
   page_fetch_timeout_seconds: number;
+  video_max_minutes: number;
+  video_wait_minutes: number;
   queue_idle_days: number;
   analysis_summary_max_chars: number;
   analysis_key_fact_max_chars: number;

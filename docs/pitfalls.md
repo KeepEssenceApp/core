@@ -83,6 +83,13 @@
 
 **做变异检查（临时改源码再还原）时，还原也要用 `/bin/cp -f`。**
 脚本里的 `cp` 又是带确认的别名，停在「overwrite? (y/n)」，源码留在改坏的状态，要手工还原。先把原文件另存一份，还原后用 `diff` 确认。
+## 视频（#103）
+
+**等视频的条目要和「等页面」的一起排除，漏一处就会被解读。** 条目分派、解读的选取在好几处各写了一遍 `fetch_state <> 'pending'`（`work.ts` 的两个 WHERE、`cron.ts` 里内置助手的两条查询）。新增 `video_wait` 以后只改一处，另一处就会把还在等视频的条目拿去解读。现在统一写成 `services/items.ts` 里的 `WAITING_STATES`；把它改回只有 `pending`，`test/video.test.ts` 里四条测试会挂。核心自己的默认初筛（`applyTriageDefaults`、`triageDefaults`）原来对 pending 也不设防，这里对 `video_wait` 单独排除。
+
+**核心默认初筛的 10 分钟要从「不再等」那一刻算，不能还从存入算。** 等了 20 分钟才读好的视频，如果还按存入时间算，读好的那一分钟里核心就先给它默认值，分派助手和用户自己的助手一次机会都没有。所以多了 `video_done_at`，默认初筛用 `COALESCE(video_done_at, created_at)`；把它改回 `created_at`，「用户自己的助手」那条测试会挂。
+
+**测试里先 GET 条目再查通知，通知是空的。** 打开一条解读过的条目就算「看过了」（`viewed_at`），通知里就不再提它。要核对通知的文字，先把 `viewed_at` 清掉，或者先查通知再打开条目。
 
 ## Workers 运行时
 

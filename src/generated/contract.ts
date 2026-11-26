@@ -24,6 +24,8 @@ export const CONTRACT: Contract = {
     "triage_per_user_per_day": 200,
     "triage_default_after_minutes": 10,
     "page_fetch_timeout_seconds": 8,
+    "video_max_minutes": 15,
+    "video_wait_minutes": 60,
     "queue_idle_days": 7,
     "analysis_summary_max_chars": 160,
     "analysis_key_fact_max_chars": 200,
@@ -118,6 +120,33 @@ export const CONTRACT: Contract = {
     "content_unavailable": {
       "zh": "没取到内容",
       "en": "Content could not be fetched"
+    },
+    "video": {
+      "description": "What an item says about its video, which is read apart from the item's text (`video_state`). The core returns the key; a client shows the text in the user's language. `recognized_text_label` and `recognized_text_note` go with every block of recognized text: it is not the author's, and it may contain mistakes.\n",
+      "reading": {
+        "zh": "正在读视频里的话，读好了会接着解读。",
+        "en": "Reading what is said in the video. The analysis follows when it is done."
+      },
+      "no_speech": {
+        "zh": "视频里没有识别出话语。",
+        "en": "No speech was recognized in the video."
+      },
+      "too_long": {
+        "zh": "视频太长（超过 {minutes} 分钟），没读。",
+        "en": "The video is too long (over {minutes} minutes) and was not read."
+      },
+      "unavailable": {
+        "zh": "视频里的话没取到。",
+        "en": "What is said in the video could not be fetched."
+      },
+      "recognized_text_label": {
+        "zh": "识别出来的文字",
+        "en": "Recognized text"
+      },
+      "recognized_text_note": {
+        "zh": "从视频的声音识别出来的，可能有错字。",
+        "en": "Recognized from the video's sound. It may contain mistakes."
+      }
     },
     "notifications": {
       "one_analysis": {
