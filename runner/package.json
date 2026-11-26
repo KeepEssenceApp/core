@@ -1,0 +1,22 @@
+{
+  "name": "keepessence-runner",
+  "version": "0.0.0-development",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "description": "The independent page reader: a headless browser behind the interface of Jina Reader, for the pages the core's direct read cannot get (QA #101).",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "start": "node src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "browser": "playwright-core install chromium"
+  },
+  "dependencies": {
+    "playwright-core": "1.65.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
