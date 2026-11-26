@@ -44,6 +44,16 @@
 
 **标题的「像错误页」要整句匹配。** 旧正则 `error\b` 开头匹配，「Error handling in Rust」会被丢；`\W` 在 JS 里不认中文，「我的登录页设计」会被当成登录页。现在只在整个标题就是那个词、或者词后面跟分隔符（`登录 - 知乎`）时才算，字母和数字用 `\p{L}\p{N}` 判。
 
+## 抓取 runner（`runner/`）
+
+**Playwright 的 `route.fulfill` 回一个 302，浏览器不会再经过 `route` 去取新地址。** 浏览器自己跟了跳转，请求直接出网（我们把 Chromium 指到一个不存在的代理，所以得到的是 `ERR_PROXY_CONNECTION_FAILED`，而不是悄悄连出去）。所以跳转在 `net.ts` 里一跳一跳跟（`followRedirects`），每一跳先查是不是公开地址；页面本身先取好，再把浏览器送到跳转的终点，并把已取到的应答交给它。页面里脚本、样式的跳转同样在这里跟。
+
+**IP 字面量不会触发 `lookup`。** Node 的 `http.request({ lookup })` 只在要解析名字时才调 `lookup`，地址里直接写 IP 就绕过了。`net.ts` 对 IP 字面量自己查一遍；对名字，`guardedLookup` 在连接那一刻检查解析出的每个地址（`all: true`，Happy Eyeballs 也走它）。只靠发请求前查网址，挡不住「名字指向内网」和 DNS 重绑定。
+
+**Node 直接跑 `.ts` 不认构造函数的参数属性（`constructor(private x)`）。** 只擦类型，不转换语法。`runner/tsconfig.json` 开了 `erasableSyntaxOnly`，写错时 `typecheck` 就报。导入要带 `.ts` 后缀；`src/services/pagerules.ts` 和 `publicurl.ts` 因此不能有别的导入。
+
+**`vitest` 不会去跑 `runner/test`。** core 的 `vitest.config.ts` 只收 `test/**/*.test.ts`；runner 的测试用 `node:test`，在 `runner/` 里 `npm test`，CI 里是单独一项。
+
 ## Workers 运行时
 
 **往 R2 流式写入必须知道长度**

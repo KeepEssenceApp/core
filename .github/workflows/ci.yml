@@ -20,3 +20,21 @@ jobs:
           git diff --exit-code src/generated
       - run: npm run typecheck
       - run: npm test
+
+  # The page runner (runner/): its own dependencies, and a real headless Chromium for its tests.
+  runner:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      - run: npm ci
+      - run: npx playwright-core install --with-deps chromium
+      - run: npm run typecheck
+      - run: npm test
