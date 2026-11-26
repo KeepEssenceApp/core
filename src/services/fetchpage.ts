@@ -6,7 +6,10 @@
 // apps), and a verification wall makes the next one go (pagerules.ts, QA #100).
 import { LIMITS, num, outbound, type Env } from "../env";
 import { truncate } from "../util";
-import { ACCEPT_LANGUAGE, assessPage, userAgentsFor, wallHint, type Verdict } from "./pagerules";
+import { ACCEPT_LANGUAGE, assessPage, REFUSAL_STATUSES, userAgentsFor, wallHint, type Verdict } from "./pagerules";
+import { isPublicUrl } from "./publicurl";
+
+export { isPublicUrl };
 
 export interface Page {
   title: string;
@@ -14,52 +17,6 @@ export interface Page {
   text: string;
   /** Set by the direct read: what it made of the page. Without it (a reader service) only the length of the text counts. */
   verdict?: Verdict;
-}
-
-function ipv4Private(host: string): boolean {
-  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!m) return false;
-  const [a, b] = [Number(m[1]), Number(m[2])];
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 192 && b === 0) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    a >= 224
-  );
-}
-
-/** True when the address may be fetched: public http/https only. */
-export function isPublicUrl(raw: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return false;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-  if (url.username || url.password) return false;
-  let host = url.hostname.toLowerCase();
-  if (host.endsWith(".")) host = host.slice(0, -1);
-  if (!host) return false;
-  if (host.startsWith("[")) {
-    // IPv6 literal: refuse loopback, unspecified, unique-local, link-local, and mapped IPv4.
-    const v6 = host.slice(1, -1);
-    if (v6 === "::1" || v6 === "::" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith("::ffff:") || v6.startsWith("64:ff9b:")) {
-      return false;
-    }
-    return true;
-  }
-  if (ipv4Private(host)) return false;
-  if (/^\d+$/.test(host) || /^0x/i.test(host)) return false;
-  if (host === "localhost" || !host.includes(".")) return false;
-  if (/\.(localhost|local|internal|lan|home|corp|intranet|onion)$/.test(host)) return false;
-  return true;
 }
 
 export function siteOf(raw: string): string | null {
@@ -74,8 +31,6 @@ const MAX_REDIRECTS = 3;
 const MAX_BYTES = 2 * 1024 * 1024;
 /** How much of the start of the markup is kept to look for wall words in (bytes). */
 const HEAD_BYTES = 60000;
-/** An answer with one of these statuses is a site refusing this client, not the site's answer about the page. */
-const REFUSAL = new Set([401, 403, 406, 429, 503]);
 
 interface Extracted {
   title: string;
@@ -229,7 +184,7 @@ async function attempt(env: Env, raw: string, ua: string, maxChars: number, dead
         url = new URL(next, url).toString();
         continue;
       }
-      if (REFUSAL.has(response.status)) {
+      if (REFUSAL_STATUSES.has(response.status)) {
         await response.body?.cancel().catch(() => {});
         return { kind: "wall", reason: `status ${response.status}` };
       }

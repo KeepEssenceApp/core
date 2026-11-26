@@ -10,13 +10,13 @@ import { iso, newId, parseJson, truncate } from "../util";
 import { getUser, listAssistants } from "./accounts";
 import { signedDownloadUrl } from "./assets";
 import { coveredItems, coversOf, digestDay, digestDue, type DigestRow } from "./digests";
-import { countStatement, displayTitle, fileOfItem, liveItem, maxExpiryDays, namesOf, OPENING_CHARS, sharedText, signature } from "./items";
+import { countStatement, displayTitle, fileOfItem, liveItem, maxExpiryDays, namesOf, OPENING_CHARS, sharedText, signature, WAITING_STATES } from "./items";
 import { notifyEventStatement } from "./notify";
 
 export const WORK_KINDS: WorkKind[] = ["triage", "analysis", "digest", "deep_read"];
 
-const TRIAGE_WHERE = "triaged_at IS NULL AND archived_at IS NULL AND fetch_state <> 'pending'";
-const ANALYSIS_WHERE = "triaged_at IS NOT NULL AND analysed_at IS NULL AND archived_at IS NULL AND fetch_state <> 'pending'";
+const TRIAGE_WHERE = `triaged_at IS NULL AND archived_at IS NULL AND fetch_state NOT IN ${WAITING_STATES}`;
+const ANALYSIS_WHERE = `triaged_at IS NOT NULL AND analysed_at IS NULL AND archived_at IS NULL AND fetch_state NOT IN ${WAITING_STATES}`;
 const FREE = "(claim_id IS NULL OR claim_expires_at <= ?)";
 
 export function requireStep(actor: AssistantActor, ...anyOf: Step[]): void {
@@ -57,7 +57,7 @@ export async function listWork(env: Env, actor: AssistantActor) {
   const t = now();
   const work: { kind: WorkKind; count: number; oldest_due_at: string | null }[] = [];
   if (actor.steps.includes("triage")) {
-    const row = await env.DB.prepare(`SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM items WHERE user_id = ? AND ${TRIAGE_WHERE} AND ${FREE}`)
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS n, MIN(COALESCE(video_done_at, created_at)) AS oldest FROM items WHERE user_id = ? AND ${TRIAGE_WHERE} AND ${FREE}`)
       .bind(user.id, t)
       .first<{ n: number; oldest: number | null }>();
     if (row && row.n > 0) {
@@ -298,12 +298,13 @@ async function userTagsOf(env: Env, userId: string, itemIds: string[]): Promise<
 
 /**
  * The core's own triage: items that waited longer than `olderThanMs` (0: all waiting items of
- * the user) get the default assistant and 30 days. Never notifies.
+ * the user) get the default assistant and 30 days. Never notifies. An item whose video is still
+ * being read is not triaged; once it stops waiting, its time is counted from then (#103).
  */
 export async function applyTriageDefaults(env: Env, user: UserRow, olderThanMs: number): Promise<number> {
   const rows = await env.DB.prepare(
     `SELECT id, user_id, created_at, dispatch_to, expiry_days FROM items
-     WHERE user_id = ? AND triaged_at IS NULL AND archived_at IS NULL AND created_at <= ? LIMIT 40`,
+     WHERE user_id = ? AND triaged_at IS NULL AND archived_at IS NULL AND fetch_state <> 'video_wait' AND COALESCE(video_done_at, created_at) <= ? LIMIT 40`,
   )
     .bind(user.id, now() - olderThanMs)
     .all<Pick<ItemRow, "id" | "user_id" | "created_at" | "dispatch_to" | "expiry_days">>();
@@ -676,6 +677,9 @@ export async function getContext(env: Env, actor: AssistantActor, itemId: string
       url: item.url,
       opening: truncate(item.opening, OPENING_CHARS),
       body: item.body,
+      // What was recognized from the video's sound: kept apart from the author's body, and not for triage.
+      recognized_text: item.recognized_text ?? null,
+      video_state: item.video_state ?? null,
       content_unavailable: item.content_unavailable === 1,
       asset_url: item.asset_id ? await signedDownloadUrl(env, origin, user.id, item.asset_id) : null,
       asset_type: file.type,

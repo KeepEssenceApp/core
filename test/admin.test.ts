@@ -650,7 +650,8 @@ describe("admin: no content", () => {
     }
     for (const text of seen) {
       expect(text).not.toContain(MARKER);
-      expect(text.toLowerCase()).not.toContain("tea");
+      // Not in the random ids (usr_…, itm_…) either: sixteen random letters now and then spell "tea".
+      expect(text.toLowerCase().replace(/\b[a-z]{2,5}_[a-z0-9]{8,}\b/g, "")).not.toContain("tea");
       expect(text).not.toContain("What I learnt");
     }
     // The detail does carry what it may: names of devices and assistants, and numbers.

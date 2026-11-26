@@ -149,6 +149,7 @@ const ANALYSIS_SYSTEM = (lang: Lang) =>
   ` "verdict": "worth_deep_dive" | "good_to_know" | "skippable";\n` +
   ` "related_hint": optional, one sentence naming an earlier item, digest or note of the owner (from "related") that this connects to. Leave it out if nothing connects.}\n` +
   `Judge by the owner's rules if they say what matters. When "length" is given and the key fact mentions how long the text is, use exactly the numbers in it and do not count yourself; mention only what it lists, and do not say where the numbers came from. Never state when the item was saved, in any field: the owner sees that beside the item, and a date or time written in the title or the text is part of the content, not the moment of saving (if it matters, report it as what the text says). Every field must be a finished thought that fits its limit: write shorter rather than be cut off. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.` +
+  ` "content" is the author's own text. When "recognized_text" is given, it was recognized from the sound of the item's video: it is not the author's words and it may contain mistakes. Write "the video says …" when you rely on it, never present it as the author's text, and do not take a name or a number in it as fact. If the duration of a video is not given, do not state one.` +
   ` ${languageRule(lang)}`;
 
 /** The length of a text as a reader would count it: words for text written with spaces, characters for Chinese, Japanese and Korean. */
@@ -180,6 +181,18 @@ export function fileBlock(type: string | null | undefined, url: string | null | 
   return null;
 }
 
+/** How much of an item's text the model is shown: the author's text first, then the beginning of what was recognized from the video. */
+const CONTENT_CHARS = 24_000;
+/** The recognized text gets at least this much room when there is that much of it, whatever the author wrote. */
+const RECOGNIZED_MIN_CHARS = 8_000;
+
+export function shownText(body: string | null | undefined, recognized: string | null | undefined): { content: string; recognized_text?: string } {
+  const author = body ?? "";
+  if (!recognized) return { content: truncate(author, CONTENT_CHARS) };
+  const room = Math.min(recognized.length, Math.max(RECOGNIZED_MIN_CHARS, CONTENT_CHARS - author.length));
+  return { content: truncate(author, CONTENT_CHARS - room), recognized_text: truncate(recognized, room) };
+}
+
 async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules: Awaited<ReturnType<typeof getRules>>, origin: string): Promise<Analysed> {
   const ctx = await getContext(env, actor, itemId, "analysis", origin);
   if (ctx.item.content_unavailable) return unavailable(itemId);
@@ -193,11 +206,11 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     related: ctx.related,
     // Counted here, not by the model: the same text must always get the same number.
     length: ctx.item.body ? nonZero(textLength(ctx.item.body)) : null,
-    content: truncate(ctx.item.body ?? "", 24_000),
+    ...shownText(ctx.item.body, ctx.item.recognized_text),
   };
   // `correction` is added to the facts when an answer has to be asked for again.
   let contentFor = (correction?: string): string | ContentBlock[] => JSON.stringify(correction ? { ...facts, correction } : facts);
-  if (!ctx.item.body) {
+  if (!ctx.item.body && !ctx.item.recognized_text) {
     // No text. An image or a PDF is looked at by the model itself; a text file's content would
     // already be the body, so anything else here has nothing to read.
     const block = fileBlock(ctx.item.asset_type, ctx.item.asset_url);

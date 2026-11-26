@@ -175,8 +175,59 @@ the user saved):
   that is not public.
 
 `stats` are counts over the last 7 days by `platform` (`wechat`, `xiaohongshu`, `other`: a short
-fixed list, never an address) and by the way that read it (`none`: no way could). The settings,
-keys included, are stored in D1 (`core_state`, key `fetch.settings`).
+fixed list, never an address) and by the way that read it (`none`: no way could). Videos are counted
+apart, in the same rows: `video` when the words of a video were recognized, `video_failed` when they
+were not (no speech, too long, not to be had, the runner did not know the job, or the wait ran out).
+The way that read the page (`jina`, …) is counted as before, so one saved video post is in two rows.
+The settings, keys included, are stored in D1 (`core_state`, key `fetch.settings`).
+
+### Videos (#103)
+
+The words of a video are read by the runner, in the `jina` slot (the other ways never see a video:
+the direct read and Firecrawl cannot answer 202). For WeChat and Xiaohongshu links, when the `jina`
+slot is on, the core asks it first whatever `order` says (they are the links with videos, and the direct
+read gets least of them); for any other site that has videos (Bilibili, Weibo, Tencent Video) put `jina`
+before `direct` in `order`: a page the direct read gets in full is not asked of the runner again, and its
+video is not read.
+
+What the core asks of the reader service, at the address and with the key of the `jina` slot:
+
+- `GET {endpoint}/{address}` as for any page. `202 { data: { title, url, content }, video: { state: "reading", job, seconds } }`:
+  a video is being read; `content` is the author's own text and may be empty. `200` with
+  `video: { state: "too_long" | "unavailable", seconds }`: the video will not be read. No `video`: as before.
+  A `job` is letters, digits, `-` and `_`, 100 characters at most; anything else is an error of that way.
+- `GET {endpoint}/jobs/{job}`: `{ state: "reading" }`, `{ state: "done", video_state: "recognized", recognized_text }`,
+  `{ state: "done", video_state: "no_speech" | "too_long" | "unavailable" }`, or 404 (the job is unknown, expired, or
+  the runner restarted). Any other answer, an error, or no answer at all is asked again next minute.
+- `DELETE {endpoint}/jobs/{job}`: the job is no longer wanted. Best effort, one try.
+
+How an item waits. A post whose video is being read is saved as it is (title, the author's text as
+`body`, `video_state: "reading"`) with `fetch_state = 'video_wait'` and `fetch_deadline` = now +
+`limits.video_wait_minutes`. It is shown and counted as waiting, but it is not triaged (by the sorting
+step or by the core's default after 10 minutes) and not analysed, and the minute job does not read its
+page again (that is only for `pending`). Once per minute the core asks about the oldest 5 waiting
+items (live ones only), all at once, each with one request of at most 8 seconds. The runner is meant to
+hold one job at a time and four queued, and to refuse the rest (the core then gets `unavailable`), so
+there are not more than five to ask about.
+
+How it ends, once and for good (every write names the item, its owner, and the job it still holds, so a
+repeated answer, a late one, or a job offered for another item or user changes nothing):
+
+- `recognized`: `recognized_text` (30000 characters at most), `video_state: "recognized"`. An answer with no
+  words in it is `no_speech`; nothing is stored, and no word is made up.
+- `no_speech`, `too_long`, `unavailable`: `video_state` says so; the author's text stays.
+- 404, or `fetch_deadline` passed (including a runner that did not answer all the while): `unavailable`.
+
+The item then has content when it has the words, or an author's text of at least 60 characters (the
+same length rule as for a reader service's page): `fetch_state = 'done'`, `content_unavailable = 0`, and
+the analysis follows. With neither it is `failed` and `content_unavailable = 1`, "content could not be
+fetched". The core then sends `DELETE` for the job. The core's default triage counts its 10 minutes from
+the moment the item stopped waiting (`video_done_at`), so the sorting step still has its turn.
+
+Deleting the item, or its expiry, while it waits: a deleted item is cancelled at once by the request
+that deletes it; an archived one (expired, or deleted with the copy kept) by the minute job, 5 a run. No
+late result is written to it. Deleting the account removes the rows and tells no one: the runner forgets
+a job by its own deadline. A test read of a video address in the portal cancels the job it started.
 
 ## Feedback
 
