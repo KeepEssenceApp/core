@@ -8,6 +8,7 @@ import type { AssistantRow, ItemRow, UserRow } from "../types";
 import { firstSentence, iso, looksLikeUrl, parseJson, shorten, truncate } from "../util";
 import { assetText, isTextType, type AssetRow } from "./assets";
 import { fetchContent } from "./fetchers";
+import { titleWins, usableTitle } from "./pagerules";
 import { siteOf } from "./fetchpage";
 
 export const OPENING_CHARS = 500;
@@ -161,6 +162,18 @@ export async function liveItem(env: Env, userId: string, itemId: string): Promis
 }
 
 /**
+ * The title an item takes from a read page (QA #100): the page's own when it names the page; the
+ * item's own when the page's is only a small piece of it; "" when the page offers nothing worth
+ * having (empty, an address, a wall's or a login or error page's title, only the site's name).
+ * A title the client sent never comes here: it stays, whatever the page says.
+ */
+function pageTitle(page: { title: string; site: string }, item: { url: string | null; title: string }): string {
+  const title = cleanTitle(page.title);
+  if (!title || !usableTitle(title, { url: item.url ?? "", site: page.site })) return "";
+  return titleWins(item.title, title) ? title : item.title;
+}
+
+/**
  * Fetches the page of a link item and stores what was found. On failure the item is marked
  * "content could not be fetched". Called after the save was answered, and again by cron for
  * items whose first attempt never finished.
@@ -172,12 +185,13 @@ export async function fetchItemContent(env: Env, item: Pick<ItemRow, "id" | "use
     // Only a shell came back (navigation words, a verification wall). Its title is worth keeping;
     // its words are not content, and must not be analysed as if they were (QA #86).
     const keep = item.title_from === "client" && item.title;
+    const offered = keep ? "" : pageTitle(page, item);
     await env.DB.prepare(
       `UPDATE items SET fetch_state = 'failed', title = ?, title_from = ?, site = COALESCE(NULLIF(?, ''), site),
          content_unavailable = CASE WHEN body IS NULL OR body = '' THEN 1 ELSE 0 END
        WHERE id = ? AND user_id = ? AND fetch_state = 'pending'`,
     )
-      .bind(keep ? item.title : cleanTitle(page.title) || item.title, keep ? "client" : page.title ? "fetch" : item.title_from, page.site, item.id, item.user_id)
+      .bind(keep ? item.title : offered || item.title, keep ? "client" : offered && offered !== item.title ? "fetch" : item.title_from, page.site, item.id, item.user_id)
       .run();
     return;
   }
@@ -192,7 +206,7 @@ export async function fetchItemContent(env: Env, item: Pick<ItemRow, "id" | "use
     return;
   }
   const keepTitle = item.title_from === "client" && item.title;
-  const title = keepTitle ? item.title : cleanTitle(page.title) || firstSentence(page.text) || item.title;
+  const title = keepTitle ? item.title : pageTitle(page, item) || firstSentence(page.text) || item.title;
   const body = item.body ? item.body : page.text;
   await env.DB.prepare(
     `UPDATE items SET fetch_state = 'done', title = ?, title_from = ?, site = COALESCE(NULLIF(?, ''), site), body = ?, opening = ?,
