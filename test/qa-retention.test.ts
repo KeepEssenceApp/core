@@ -121,3 +121,14 @@ describe("QA #83: days left are counted on the calendar", () => {
     expect((await call(env, "GET", `/v1/items/${id}`, { token: ann.token })).json.days_left).toBe(0);
   });
 });
+
+describe("QA #88: the choices for how long items are kept", () => {
+  it("the core refuses days outside 1 to 365, none at all, more than six, and anything that is not a whole number", async () => {
+    const env = makeEnv();
+    const ann = await signIn(env);
+    const patch = (expiry_options: unknown) => call(env, "PATCH", "/v1/settings", { token: ann.token, body: { expiry_options } });
+    for (const wrong of [[0], [400], [7, 0], [7, 30, 400], [1.5], [-3], [], [1, 2, 3, 4, 5, 6, 7], ["7"], "7"]) expect((await patch(wrong)).status, JSON.stringify(wrong)).toBe(400);
+    expect((await call(env, "GET", "/v1/settings", { token: ann.token })).json.expiry_options).toEqual([7, 30, 90, 365]);
+    for (const right of [[1], [365], [7, 30]]) expect((await patch(right)).status, JSON.stringify(right)).toBe(200);
+  });
+});
