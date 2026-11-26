@@ -78,6 +78,13 @@ apart: it is only ever in the job's result, as `recognized_text`.
   aborted, the files are removed) and forgets a result.
 - Jobs are in memory. One runs at a time (`RUNNER_VIDEO_CONCURRENCY`), `RUNNER_VIDEO_QUEUE` wait, and when both are full a new video is
   `unavailable` at once. A job has 20 minutes for all its steps from the moment it runs. A result is kept 30 minutes after it is done, then forgotten.
+- **A site that refuses the download is left alone for a while.** When yt-dlp's download (or its question about the length) is answered
+  `567` (Bilibili's word for "not you, not now"), `412` or `429`, every video of that site (by its name: `bilibili.com`, which `b23.tv` and
+  `m.bilibili.com` are too) is `unavailable` at once for `RUNNER_VIDEO_COOLDOWN_HOURS` (6 by default; `0` for none): nothing is probed, nothing
+  is downloaded, and a job that was already waiting for that site never downloads. The page's own words still come back, as for any
+  `unavailable` video. The runner only reads the number out of yt-dlp's message (`HTTP Error 567`) and throws the rest away. It is kept in
+  memory by the site's name alone, so a runner that restarts forgets it (the first video afterwards asks once, is refused once, and the
+  cool-down starts again). A line in the log says that a cool-down began (`video_cooldown`, the platform class), never for which site.
 - Each job has a directory of its own under `<tmpdir>/ke-runner-jobs/<id>`, **removed in a `finally`** whatever happened; the video file is
   removed as soon as the sound is out; what an earlier run left behind is removed at start-up. Nothing keeps the address after the job is over.
 - Download: yt-dlp through a read opened on the filtering proxy (a cap of 150 MB at the proxy, `--max-filesize 150M`, 3 minutes, 15 s socket
@@ -141,6 +148,7 @@ npx playwright-core install chromium      # on Linux: add --with-deps (needs sud
 | `RUNNER_TRANSCRIBE_KEY` | — (required with the address) | the secret the worker wants as `Authorization: Bearer`; keep it in the same mode-0600 file as `RUNNER_KEY` |
 | `RUNNER_VIDEO_MAX_MINUTES` | `15` | a longer video is `too_long` and is not downloaded |
 | `RUNNER_VIDEO_QUEUE` / `RUNNER_VIDEO_CONCURRENCY` | `4` / `1` | video jobs waiting / running at once; when both are full the answer is `unavailable` at once |
+| `RUNNER_VIDEO_COOLDOWN_HOURS` | `6` | after a site answers a download 567, 412 or 429, its videos are `unavailable` at once for this many hours (`0`: no cool-down) |
 | `RUNNER_YTDLP` / `RUNNER_FFMPEG` | `yt-dlp` / `ffmpeg` | the two programs, by name (on the service's search path) or by path |
 
 ```
@@ -161,7 +169,7 @@ ssh think
 ${EDITOR:-nano} ~/.config/ke-runner/env      # add or change, one per line, no quotes:
 #   RUNNER_TRANSCRIBE_URL=http://<ms's tailnet name>:<the worker's port>
 #   RUNNER_TRANSCRIBE_KEY=<the worker's key>
-#   (optional) RUNNER_VIDEO_MAX_MINUTES=15  RUNNER_VIDEO_QUEUE=4  RUNNER_VIDEO_CONCURRENCY=1
+#   (optional) RUNNER_VIDEO_MAX_MINUTES=15  RUNNER_VIDEO_QUEUE=4  RUNNER_VIDEO_CONCURRENCY=1  RUNNER_VIDEO_COOLDOWN_HOURS=6
 chmod 600 ~/.config/ke-runner/env
 systemctl --user restart ke-runner
 systemctl --user is-active ke-runner         # active

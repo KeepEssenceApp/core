@@ -6,7 +6,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import type { MediaRef } from "../src/media.ts";
+import { Refused, type MediaRef } from "../src/media.ts";
 import { KEY, page, redirect, SAID, start, TEA, WALL, type Options, type Routes, type Started } from "./helpers.ts";
 
 let running: Started | null = null;
@@ -233,6 +233,47 @@ describe("the other platforms", () => {
     // The job starts in the background: the download is asked for a moment later, for the same page.
     assert.ok(await until(() => s.calls.download.length > 0), "the job did not start");
     assert.deepEqual(s.calls.download.map((x) => (x as { page: string }).page), ["http://www.bilibili.com/video/BV1zz411c7mF"]);
+  });
+
+  it("after Bilibili refuses a download (567) its next video is answered unavailable at once, the page's words still come back, and nothing is probed or downloaded", async () => {
+    let downloads = 0;
+    const s = await run(
+      {
+        "http://www.bilibili.com/video/BV1one0000000": () => videoPage("第一个视频_哔哩哔哩_bilibili"),
+        "http://www.bilibili.com/video/BV1two0000000": () => videoPage("第二个视频_哔哩哔哩_bilibili"),
+        "http://www.xiaohongshu.com/explore/video": () => note(videoNote()),
+      },
+      {
+        jobs: {
+          cooldownMs: 6 * 3600 * 1000,
+          download: async (ref: MediaRef, dir: string) => {
+            downloads++;
+            if (ref.kind === "page") throw new Refused(567);
+            await writeFile(join(dir, "media.mp4"), "video");
+            return join(dir, "media.mp4");
+          },
+        },
+      },
+    );
+    const first = await s.read("http://www.bilibili.com/video/BV1one0000000");
+    assert.equal(first.status, 202);
+    assert.deepEqual((await waitDone(s, first.json.video.job)).video_state, "unavailable");
+    assert.equal(downloads, 1);
+    assert.equal(s.calls.probe.length, 1);
+
+    // The next Bilibili video: 200 at once, the page's own words, "unavailable"; no probe, no job, no download.
+    const second = await s.read("http://www.bilibili.com/video/BV1two0000000");
+    assert.equal(second.status, 200);
+    assert.deepEqual(second.json.video, { state: "unavailable", seconds: null });
+    assert.ok(second.json.data.content.length > 0 || second.json.data.title.length > 0);
+    assert.equal(s.calls.probe.length, 1, "the site was probed during its cool-down");
+    assert.equal(downloads, 1, "the site was downloaded from during its cool-down");
+    assert.deepEqual(s.jobs.retained().filter((j) => (j as { state: string }).state !== "done"), []);
+
+    // Another site is read as usual.
+    const other = await s.read("http://www.xiaohongshu.com/explore/video");
+    assert.equal(other.status, 202);
+    assert.ok(await until(() => downloads === 2), "the other site's video was not downloaded");
   });
 
   it("Bilibili, a Weibo video and Tencent Video are asked for their length through the media page; a short link is followed first", async () => {

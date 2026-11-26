@@ -4,10 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import type { VideoRef } from "../src/detect.ts";
 import { createJobs, type Jobs, type JobsOptions } from "../src/jobs.ts";
-import type { MediaRef, Pipeline } from "../src/media.ts";
+import { Refused, type MediaRef, type Pipeline } from "../src/media.ts";
 import { fakes, SAID } from "./helpers.ts";
 
 const ADDRESS = "http://cdn.example.org/secret-video-path/clip.mp4";
@@ -404,5 +404,147 @@ describe("what is kept", () => {
       assert.deepEqual(Object.keys(fields).filter((k) => !["at", "result", "video_state", "stage", "platform", "ms"].includes(k)), []);
     }
     assert.deepEqual(s.logs.map((l) => JSON.parse(l).result), ["video_done", "video_done", "video_cancelled"]);
+  });
+});
+
+describe("a site that refuses the download is left alone for a while", () => {
+  const HOURS = 3600 * 1000;
+  /** Downloads that are refused, and how many were asked for. */
+  let asked = 0;
+  const refusing = (status = 567): Partial<Pipeline> => ({
+    download: async () => {
+      asked++;
+      throw new Refused(status);
+    },
+  });
+  beforeEach(() => {
+    asked = 0;
+  });
+  /** A clock the test moves. */
+  const clock = (start = 1_000_000) => {
+    let t = start;
+    return { now: () => t, advance: (ms: number) => (t += ms) };
+  };
+  const finished = async (s: ReturnType<typeof setup>, id: string) => {
+    assert.ok(await until(() => s.jobs.get(id)?.state === "done"), "the job did not end");
+    return s.jobs.get(id);
+  };
+
+  it("after a 567 the site's videos are unavailable at once, with nothing probed and nothing downloaded; other sites go on; after the cool-down it asks again", async () => {
+    const c = clock();
+    const s = setup({ cooldownMs: 6 * HOURS, now: c.now }, refusing());
+    const first = await s.jobs.start(page, "other", idle);
+    assert.ok(first.state === "reading");
+    assert.deepEqual(await finished(s, first.job), { state: "done", video_state: "unavailable" });
+    assert.equal(s.calls.probe.length, 1);
+    assert.equal(s.calls.extract + s.calls.transcribe, 0);
+
+    // The same site, a minute and then five hours later: told at once, and not asked.
+    for (const later of [60 * 1000, 5 * HOURS - 60 * 1000]) {
+      c.advance(later);
+      assert.deepEqual(await s.jobs.start(page, "other", idle), { state: "unavailable", seconds: null });
+    }
+    assert.equal(s.calls.probe.length, 1, "the site was probed during its cool-down");
+    assert.equal(asked, 1, "the site was downloaded from during its cool-down");
+    assert.deepEqual(s.jobs.retained().filter((j) => (j as { state: string }).state !== "done"), []);
+
+    // Another site is another site.
+    const other = await s.jobs.start(direct(), "xiaohongshu", idle);
+    assert.equal(other.state, "reading");
+
+    // Six hours after the refusal: the site is asked again.
+    c.advance(HOURS + 60 * 1000);
+    const again = await s.jobs.start(page, "other", idle);
+    assert.equal(again.state, "reading");
+    assert.equal(s.calls.probe.length, 2);
+  });
+
+  it("412 and 429 are refusals too; 404 or any other failure is not", async () => {
+    for (const [status, cools] of [[412, true], [429, true], [567, true]] as const) {
+      const s = setup({ cooldownMs: HOURS }, refusing(status));
+      const a = await s.jobs.start(page, "other", idle);
+      assert.ok(a.state === "reading");
+      await finished(s, a.job);
+      assert.equal((await s.jobs.start(page, "other", idle)).state === "unavailable", cools, String(status));
+    }
+    // A failure that is not the site's refusal: the next video is asked about as usual.
+    const plain = setup({ cooldownMs: HOURS }, { download: async () => { throw new Error("no media was downloaded"); } });
+    const a = await plain.jobs.start(page, "other", idle);
+    assert.ok(a.state === "reading");
+    await finished(plain, a.job);
+    assert.equal((await plain.jobs.start(page, "other", idle)).state, "reading");
+    assert.equal(plain.calls.probe.length, 2);
+  });
+
+  it("a refusal while the length is asked is a refusal too: the site is left alone from then on", async () => {
+    const s = setup({ cooldownMs: HOURS }, {
+      probe: async () => {
+        throw new Refused(412);
+      },
+    });
+    assert.deepEqual(await s.jobs.start(page, "other", idle), { state: "unavailable", seconds: null });
+    const probed = s.calls.probe.length;
+    assert.deepEqual(await s.jobs.start(page, "other", idle), { state: "unavailable", seconds: null });
+    assert.equal(s.calls.probe.length, probed, "asked again during the cool-down");
+  });
+
+  it("a short link and the site's other addresses are one site: bilibili.com, b23.tv and m.bilibili.com", async () => {
+    const s = setup({ cooldownMs: HOURS }, refusing());
+    const a = await s.jobs.start({ kind: "page", page: "https://b23.tv/AbCdEf" }, "other", idle);
+    assert.ok(a.state === "reading");
+    await finished(s, a.job);
+    for (const address of [PAGE, "https://m.bilibili.com/video/BV1xx411c7mD", "https://b23.tv/Other"]) {
+      assert.equal((await s.jobs.start({ kind: "page", page: address }, "other", idle)).state, "unavailable", address);
+    }
+    assert.equal(s.calls.probe.length, 1);
+  });
+
+  it("a job that was waiting for the site when it refused never downloads: unavailable, and the next site's job runs", async () => {
+    const hold = gate();
+    let downloads = 0;
+    const s = setup({ cooldownMs: HOURS, concurrency: 1 }, {
+      download: async (ref, dir) => {
+        downloads++;
+        if (ref.kind === "page") {
+          await hold.opened;
+          throw new Refused(567);
+        }
+        await writeFile(join(dir, "media.mp4"), "video");
+        return join(dir, "media.mp4");
+      },
+    });
+    const first = await s.jobs.start(page, "other", idle);
+    const waitingSame = await s.jobs.start({ kind: "page", page: "https://www.bilibili.com/video/BV1second0000" }, "other", idle);
+    const waitingOther = await s.jobs.start(direct(), "xiaohongshu", idle);
+    assert.ok(first.state === "reading" && waitingSame.state === "reading" && waitingOther.state === "reading");
+    assert.ok(await until(() => downloads === 1));
+    hold.open();
+    assert.deepEqual(await finished(s, first.job), { state: "done", video_state: "unavailable" });
+    assert.deepEqual(await finished(s, waitingSame.job), { state: "done", video_state: "unavailable" });
+    assert.deepEqual((await finished(s, waitingOther.job))?.state, "done");
+    assert.equal(downloads, 2, "the waiting job of the same site was downloaded");
+    assert.ok(s.logs.some((l) => JSON.parse(l).stage === "cooldown"));
+  });
+
+  it("no cool-down when it is not set or 0: a refusal is just an unavailable video", async () => {
+    for (const over of [{}, { cooldownMs: 0 }]) {
+      const s = setup(over, refusing());
+      const a = await s.jobs.start(page, "other", idle);
+      assert.ok(a.state === "reading");
+      await finished(s, a.job);
+      assert.equal((await s.jobs.start(page, "other", idle)).state, "reading");
+    }
+  });
+
+  it("is kept by the site's name alone: nothing of the address stays, and the log says that it began but not for what", async () => {
+    const s = setup({ cooldownMs: HOURS }, refusing());
+    const a = await s.jobs.start(page, "other", idle);
+    assert.ok(a.state === "reading");
+    await finished(s, a.job);
+    const kept = JSON.stringify(s.jobs.retained());
+    for (const never of ["BV1xx411c7mD", "bilibili"]) assert.ok(!kept.includes(never), never);
+    const lines = s.logs.map((l) => JSON.parse(l));
+    assert.ok(lines.some((l) => l.result === "video_cooldown" && l.platform === "other" && l.ms === 0));
+    for (const never of ["BV1xx411c7mD", "bilibili", "567"]) assert.ok(!s.logs.join("\n").includes(never), never);
   });
 });

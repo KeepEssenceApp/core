@@ -5,6 +5,8 @@
 //   - One at a time by default, a few waiting. When both are full a new video is "unavailable" at once.
 //   - Each job has a directory of its own, which is removed in a `finally`, whatever happened: the video, the sound,
 //     a failure, a cancel, the deadline. What an earlier run left behind is removed at start-up.
+//   - A site that refuses a download (567, 412, 429) is not asked again for the cool-down (cooldown.ts): its videos are
+//     "unavailable" at once, before anything is probed, and a job that was waiting for it never downloads.
 //   - A job that is over keeps only its result (`video_state` and the words) for 30 minutes, for the core to fetch,
 //     and not the address it was made from.
 //   - Nothing here is logged but how it went: when, which platform class, how long, never an address or a word.
@@ -15,8 +17,9 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { VideoRef } from "./detect.ts";
-import type { MediaRef, Pipeline } from "./media.ts";
+import { createCooldown } from "./cooldown.ts";
+import { siteOfRef, type VideoRef } from "./detect.ts";
+import { Refused, type MediaRef, type Pipeline } from "./media.ts";
 
 export type VideoState = "recognized" | "no_speech" | "too_long" | "unavailable";
 
@@ -35,6 +38,8 @@ export interface JobsOptions extends Pipeline {
   queue: number;
   /** Where the jobs' directories go. Everything in it is removed at start-up. */
   root?: string;
+  /** After a site refuses a download its videos are "unavailable" at once for this many milliseconds. Not set, or 0: no cool-down. */
+  cooldownMs?: number;
   /** All the steps of one job together, from the moment it starts to run. */
   deadlineMs?: number;
   /** How long a finished job's result is kept. */
@@ -61,6 +66,8 @@ export interface Jobs {
 interface Job {
   id: string;
   platform: string;
+  /** The site's name (`bilibili.com`), for the cool-down. Dropped when the job is over. */
+  site: string | null;
   state: "queued" | "running" | "done";
   /** Where the video is. Dropped when the job is over. */
   ref: MediaRef | null;
@@ -87,6 +94,7 @@ export function createJobs(opts: JobsOptions): Jobs {
   const log = opts.log ?? ((l: string) => console.log(l));
   const say = (fields: Record<string, unknown>) => log(JSON.stringify({ at: new Date().toISOString(), ...fields }));
 
+  const cooldown = createCooldown(opts.cooldownMs ?? 0, now);
   const jobs = new Map<string, Job>();
   const waiting: Job[] = [];
   let running = 0;
@@ -120,6 +128,11 @@ export function createJobs(opts: JobsOptions): Jobs {
         work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
       });
     try {
+      // A site that refused while this job waited: nothing is asked of it.
+      if (job.site && cooldown.active(job.site) !== null) {
+        stage = "cooldown";
+        throw new Error("cooling down");
+      }
       await step(mkdir(dir, { recursive: true, mode: 0o700 }));
       const file = await step(opts.download(job.ref!, dir, signal));
       stage = "extract";
@@ -129,12 +142,17 @@ export function createJobs(opts: JobsOptions): Jobs {
       const said = await step(opts.transcribe(audio, signal));
       result = said.kind === "text" ? { video_state: "recognized", recognized_text: said.text } : { video_state: said.kind };
       stage = "done";
-    } catch {
+    } catch (e) {
       // "unavailable", at `stage` (or a cancel, which has already forgotten the job)
+      if (e instanceof Refused && job.site && !job.cancelled) {
+        cooldown.start(job.site);
+        say({ result: "video_cooldown", platform: job.platform, ms: 0 });
+      }
     } finally {
       clearTimeout(timer);
       await rm(dir, { recursive: true, force: true }).catch(() => {});
       job.ref = null; // nothing keeps the address
+      job.site = null;
     }
     if (job.cancelled) return;
     if (signal.reason === "deadline" && stage !== "done") stage = "deadline";
@@ -165,11 +183,18 @@ export function createJobs(opts: JobsOptions): Jobs {
       await ready;
       const known = ref.kind === "direct" ? ref.seconds : null;
       if (!opts.enabled || closed || ref.kind === "unsupported") return { state: "unavailable", seconds: ref.kind === "unsupported" ? null : known };
+      // A site that has shut the door is not asked, not even for the length of the video.
+      const site = siteOfRef(ref);
+      if (site && cooldown.active(site) !== null) return { state: "unavailable", seconds: known };
       let seconds = known;
       if (ref.kind === "page") {
         try {
           seconds = await opts.probe(ref.page, signal);
-        } catch {
+        } catch (e) {
+          if (e instanceof Refused && site) {
+            cooldown.start(site);
+            say({ result: "video_cooldown", platform, ms: 0 });
+          }
           seconds = null;
         }
       }
@@ -179,7 +204,7 @@ export function createJobs(opts: JobsOptions): Jobs {
       if (ref.kind === "direct" && ref.urls.length === 0) return { state: "unavailable", seconds };
       if (running + waiting.length >= opts.concurrency + opts.queue) return { state: "unavailable", seconds };
       const id = randomBytes(16).toString("hex");
-      const job: Job = { id, platform, state: "queued", ref, ctl: new AbortController(), result: null, doneAt: 0, cancelled: false, settled: Promise.resolve() };
+      const job: Job = { id, platform, site, state: "queued", ref, ctl: new AbortController(), result: null, doneAt: 0, cancelled: false, settled: Promise.resolve() };
       jobs.set(id, job);
       waiting.push(job);
       pump();
@@ -230,7 +255,7 @@ export function createJobs(opts: JobsOptions): Jobs {
     },
 
     retained() {
-      return [...jobs.values()].map((j) => ({ id: j.id, state: j.state, platform: j.platform, ref: j.ref, result: j.result }));
+      return [...jobs.values()].map((j) => ({ id: j.id, state: j.state, platform: j.platform, ref: j.ref, site: j.site, result: j.result }));
     },
   };
 }

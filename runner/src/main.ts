@@ -10,7 +10,7 @@ const proxy = new FilteringProxy();
 await proxy.listen();
 const renderer = new Renderer(cfg, proxy);
 // What is said in a video post is read in the background, when a transcription worker is set (RUNNER_TRANSCRIBE_URL); otherwise a video post is "unavailable".
-const jobs = createJobs({ ...createPipeline(cfg, proxy), enabled: !!cfg.transcribeUrl, maxSeconds: cfg.videoMaxMinutes * 60, concurrency: cfg.videoConcurrency, queue: cfg.videoQueue });
+const jobs = createJobs({ ...createPipeline(cfg, proxy), enabled: !!cfg.transcribeUrl, maxSeconds: cfg.videoMaxMinutes * 60, concurrency: cfg.videoConcurrency, queue: cfg.videoQueue, cooldownMs: cfg.videoCooldownMs });
 await jobs.ready;
 const server = createRunner(cfg, renderer, (l) => console.log(l), jobs);
 server.listen(cfg.port, cfg.host, () =>
