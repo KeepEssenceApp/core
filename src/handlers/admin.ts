@@ -5,7 +5,7 @@
 // - No content: no title, body, address or text of an item, analysis, daily digest or note ever
 //   leaves through these routes. Only counts, times, and the names of devices and assistants.
 // - Few queries: every list is one aggregating statement or one batch, never a loop over users.
-import { loadFetchSettings, PROVIDERS, runProvider, saveFetchSettings, THIN_CHARS, validEndpoint, type FetchSettings, type ProviderId, type TestResult } from "../services/fetchers";
+import { loadFetchSettings, PROVIDERS, runProvider, saveFetchSettings, usable, validEndpoint, type FetchSettings, type ProviderId, type TestResult } from "../services/fetchers";
 import { isPublicUrl } from "../services/fetchpage";
 import { forwardingConfigured, type FeedbackRow } from "./feedback";
 import pkg from "../../package.json";
@@ -257,7 +257,7 @@ const testFetch: AdminHandler = async (env, request) => {
     const page = await runProvider(env, id, s, b.url);
     title = page.title;
     const chars = page.text.replace(/\s+/g, "").length;
-    result = { at: now(), url_host: new URL(b.url).hostname, ok: chars >= THIN_CHARS, chars, ms: Date.now() - started, error: chars >= THIN_CHARS ? "" : "only a page shell came back" };
+    result = { at: now(), url_host: new URL(b.url).hostname, ok: usable(page), chars, ms: Date.now() - started, error: usable(page) ? "" : "only a page shell came back" };
   } catch (e) {
     result = { at: now(), url_host: new URL(b.url).hostname, ok: false, chars: 0, ms: Date.now() - started, error: e instanceof Error ? e.message.slice(0, 200) : "failed" };
   }
