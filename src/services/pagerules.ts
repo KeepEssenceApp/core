@@ -18,6 +18,9 @@ export const UA_DESKTOP = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 export const UA_IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 export const ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8";
 
+/** An answer with one of these statuses is a site refusing this client, not the site's answer about the page: the next User-Agent may do better. */
+export const REFUSAL_STATUSES: ReadonlySet<number> = new Set([401, 403, 406, 429, 503]);
+
 // ---------------------------------------------------------------- hosts
 
 /** The host of an address, lower case, without a trailing dot; "" when it is not an address. */
