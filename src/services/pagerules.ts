@@ -38,14 +38,21 @@ export function onDomain(host: string, domains: readonly string[]): boolean {
   return domains.some((d) => host === d || host.endsWith("." + d));
 }
 
+/**
+ * Xiaohongshu (rednote) and its short-link hosts. One list, for every check that names the site: the User-Agent order, the
+ * short posts, the platform class in the counts and in the runner. A short link (`xhslink.cn`, `xhslink.com`) is Xiaohongshu
+ * the moment it is saved, before any redirect has been followed (QA #103).
+ */
+export const XIAOHONGSHU: readonly string[] = ["xiaohongshu.com", "rednote.com", "xhslink.com", "xhslink.cn"];
+
 // Apps whose pages are better asked for with a phone User-Agent first.
 const PHONE_FIRST = [
-  "xiaohongshu.com", "xhslink.com", "rednote.com", "rednotecdn.com", "douyin.com", "iesdouyin.com", "bilibili.com", "b23.tv",
+  ...XIAOHONGSHU, "rednotecdn.com", "douyin.com", "iesdouyin.com", "bilibili.com", "b23.tv",
   "weibo.com", "weibo.cn", "t.cn", "kuaishou.com", "zhihu.com",
 ];
 // Posts that are legitimately short: a caption is the content.
 const SHORT_FORM = [
-  "x.com", "twitter.com", "weibo.com", "weibo.cn", "xiaohongshu.com", "xhslink.com", "rednote.com", "douyin.com", "iesdouyin.com",
+  "x.com", "twitter.com", "weibo.com", "weibo.cn", ...XIAOHONGSHU, "douyin.com", "iesdouyin.com",
   "bilibili.com", "b23.tv", "instagram.com", "threads.net",
 ];
 
@@ -62,6 +69,28 @@ export const WALL_HINTS = [
   "访问过于频繁", "Just a moment...", "Enable JavaScript and cookies", "参数错误", "该内容已被发布者删除",
 ];
 
+/**
+ * What a sign-in page says in place of the page that was asked for (Xiaohongshu sends a visitor it does not know here).
+ * A sign-in page is short, so these count in the title and the description, and at the top of the text only when the
+ * page is short: an article that explains a "Continue with Google" button is still an article.
+ */
+export const LOGIN_HINTS = ["使用手机号或扫码登录", "使用 Google 账号登录", "使用 Apple 账号登录", "Continue with Google", "Continue with Apple"];
+
+/**
+ * Is this the address of a sign-in page: its first path segment is login or signin, or its host is a passport? A page
+ * that was asked for and ended on one was not given: the site wants a login first, and what the page says is not the page.
+ */
+export function loginAddress(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const first = url.pathname.split("/").find(Boolean)?.toLowerCase() ?? "";
+  return first === "login" || first === "signin" || first === "sign-in" || first === "sign_in" || url.hostname.toLowerCase().startsWith("passport.");
+}
+
 const WALL_TEXT_HEAD = 600;
 const WALL_HTML_HEAD = 20000;
 /** Below this much text the page is short enough that a wall word anywhere in its first markup counts. */
@@ -77,10 +106,15 @@ const letters = (s: string): number => [...s.replace(/[^\p{L}\p{N}]+/gu, "")].le
  */
 export function wallHint(page: { title?: string; description?: string; text?: string; noscript?: string; head?: string }): string | null {
   const text = page.text ?? "";
+  const short = letters(text) < WALL_SHORT_PAGE;
   const seen = [page.title ?? "", page.description ?? "", text.slice(0, WALL_TEXT_HEAD), (page.noscript ?? "").slice(0, WALL_TEXT_HEAD)];
-  if (letters(text) < WALL_SHORT_PAGE) seen.push((page.head ?? "").slice(0, WALL_HTML_HEAD));
+  if (short) seen.push((page.head ?? "").slice(0, WALL_HTML_HEAD));
   const hay = seen.join("\n");
-  return WALL_HINTS.find((h) => hay.includes(h)) ?? null;
+  const wall = WALL_HINTS.find((h) => hay.includes(h));
+  if (wall) return wall;
+  // A sign-in page: in the title or the description, or at the top of a page that is short.
+  const sign = [page.title ?? "", page.description ?? "", ...(short ? [text.slice(0, WALL_TEXT_HEAD)] : [])].join("\n");
+  return LOGIN_HINTS.find((h) => sign.includes(h)) ?? null;
 }
 
 // ---------------------------------------------------------------- shells
