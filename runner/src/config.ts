@@ -10,7 +10,7 @@ export interface Config {
   /** Pages open at once; more wait in the queue, and when the queue is full the answer is 503 at once. */
   concurrency: number;
   queue: number;
-  /** The most the page's own files may add up to, and the most text returned. */
+  /** The most the page's own files may add up to (bytes either way through the proxy), and the most text returned. */
   maxBytes: number;
   maxChars: number;
   chromiumPath?: string;
@@ -29,7 +29,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deadlineMs: num(env.RUNNER_DEADLINE_MS, 17000),
     concurrency: num(env.RUNNER_CONCURRENCY, 2),
     queue: num(env.RUNNER_QUEUE, 4),
-    maxBytes: num(env.RUNNER_MAX_BYTES, 4 * 1024 * 1024),
+    maxBytes: num(env.RUNNER_MAX_BYTES, 8 * 1024 * 1024),
     maxChars: num(env.RUNNER_MAX_CHARS, 100000),
     chromiumPath: env.RUNNER_CHROMIUM_PATH || undefined,
     chromiumArgs: [...(env.RUNNER_NO_SANDBOX === "1" ? ["--no-sandbox"] : []), ...(env.RUNNER_CHROMIUM_ARGS ? env.RUNNER_CHROMIUM_ARGS.split(/\s+/).filter(Boolean) : [])],
