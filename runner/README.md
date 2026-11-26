@@ -87,10 +87,11 @@ To move it to a newer commit, from a checkout of `main`:
 
 ```
 HOST=<the runner machine>
+VERSION=$(git rev-parse --short HEAD)
 ssh $HOST 'cp -a ~/ke-runner ~/ke-runner.prev'             # the way back
 rsync -a --delete --exclude node_modules runner/ $HOST:ke-runner/runner/
 rsync -a src/services/pagerules.ts src/services/publicurl.ts $HOST:ke-runner/src/services/
-ssh $HOST "cd ~/ke-runner/runner && npm ci && git -C <checkout> rev-parse --short HEAD > ../VERSION && systemctl --user restart ke-runner"
+ssh $HOST "cd ~/ke-runner/runner && npm ci && echo $VERSION > ../VERSION && systemctl --user restart ke-runner"
 ```
 
 Then check it the way the first time was checked: no key → 401, the key on a public page → 200, an internal
