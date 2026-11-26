@@ -83,13 +83,64 @@ export async function dispatchForUser(env: Env, userId: string): Promise<number>
 // ---------------------------------------------------------------- worker assistant (steps: analysis, digest)
 
 /**
- * The language the owner reads (their account's language, QA #18). Said again where the model cannot
- * miss it: an item in another language, a title or rules in it, make a model write in that
- * language unless told, in so many words, to translate.
+ * What a piece of writing is to be in, and what its language check looks for (QA #18, Cheney's option 2).
+ * `name` is what the model is told. `check` is what the answer is judged against: "zh" for Chinese; "en" means
+ * "not in another script" (Latin script), because the script cannot tell English from French. `from` says why:
+ * the account (the switch is on, or the item's own language cannot be told) or the item itself.
  */
-const languageRule = (lang: Lang) =>
-  `Every text field you write (summary, key_fact, points, related_hint) is in ${LANG_NAME[lang]}, whatever language the item, its title or the owner's rules are written in: ` +
-  `translate what you report, do not answer in the item's language. Names and short quotations may stay as they are.`;
+export interface Target {
+  name: string;
+  check: Lang;
+  from: "account" | "item";
+}
+
+const accountTarget = (lang: Lang): Target => ({ name: LANG_NAME[lang], check: lang, from: "account" });
+
+/**
+ * The language of an item's own text, by script: Chinese, Latin, or null when it cannot be told (fewer than five
+ * letters, or kana, Hangul, Cyrillic ... which are neither). Same thresholds as `writtenIn`, so a text that is
+ * "zh" is one that `writtenIn("zh", …)` accepts and a text that is "latin" is one that `writtenIn("en", …)` does.
+ */
+export function scriptOf(text: string): "zh" | "latin" | null {
+  const { letters, han, foreign } = scriptsOf(text);
+  if (letters < MIN_JUDGED_LETTERS) return null;
+  if (han / letters >= 0.3 && foreign / letters < 0.2) return "zh";
+  if ((han + foreign) / letters < 0.3) return "latin";
+  return null;
+}
+
+const itemTarget = (script: "zh" | "latin"): Target =>
+  script === "zh" ? { name: LANG_NAME.zh, check: "zh", from: "item" } : { name: "the language the item's own text is written in", check: "en", from: "item" };
+
+/** The language of one analysis: the account's when the switch is on or the item's cannot be told, else the item's own. */
+export function analysisTarget(account: Lang, alwaysMine: boolean, ownText: string): Target {
+  if (alwaysMine) return accountTarget(account);
+  const script = scriptOf(ownText);
+  return script ? itemTarget(script) : accountTarget(account);
+}
+
+/** The language of a daily digest: the one most of the day's analyses are written in; an even split, or none to go by, the account's. */
+export function digestTarget(account: Lang, alwaysMine: boolean, summaries: string[]): Target {
+  if (alwaysMine) return accountTarget(account);
+  const count = { zh: 0, latin: 0 };
+  for (const text of summaries) {
+    const script = scriptOf(text);
+    if (script) count[script]++;
+  }
+  if (count.zh === count.latin) return accountTarget(account);
+  return itemTarget(count.zh > count.latin ? "zh" : "latin");
+}
+
+/**
+ * The language of the writing, said again where the model cannot miss it: an item in another language, a title or
+ * rules in it, make a model write in that language unless told, in so many words, to translate (or not to).
+ */
+const languageRule = (t: Target) =>
+  t.from === "account"
+    ? `Every text field you write (summary, key_fact, points, related_hint) is in ${t.name}, whatever language the item, its title or the owner's rules are written in: ` +
+      `translate what you report, do not answer in the item's language. Names and short quotations may stay as they are.`
+    : `Every text field you write (summary, key_fact, points, related_hint) is in ${t.name}, whatever language the item's title or the owner's rules are written in: ` +
+      `do not translate it into another language. Names and short quotations may stay as they are.`;
 
 /** Letters by script: Latin, Han, kana, and everything else (Hangul, Cyrillic, Arabic ...). */
 function scriptsOf(text: string): { letters: number; latin: number; han: number; foreign: number } {
@@ -141,8 +192,8 @@ export function wrongLanguageFields(lang: Lang, x: any): string[] {
 
 const hasPoints = (x: any): boolean => Array.isArray(x?.points) && x.points.some((p: unknown) => typeof p === "string" && p.trim());
 
-const ANALYSIS_SYSTEM = (lang: Lang) =>
-  `You analyse one saved item for its owner. Write in ${LANG_NAME[lang]}. Answer with JSON only, with exactly these fields:\n` +
+const ANALYSIS_SYSTEM = (target: Target) =>
+  `You analyse one saved item for its owner. Write in ${target.name}. Answer with JSON only, with exactly these fields:\n` +
   `{"summary": one complete sentence saying what the item is about: at most 60 characters in Chinese or 25 words in a language written with spaces (never more than ${LIMITS.analysis_summary_max_chars} characters);\n` +
   ` "key_fact": one line, at most ${LIMITS.analysis_key_fact_max_chars} characters, that fits the kind of content (article: author and length; video: duration; repository: language and stars; screenshot: the main thing in it; post: author and platform; text: word count; file: format and pages);\n` +
   ` "points": 1 to ${LIMITS.analysis_points_max} complete sentences with the substance (always at least one, however short the item is), each at most ${LIMITS.analysis_point_max_chars} characters;\n` +
@@ -150,7 +201,7 @@ const ANALYSIS_SYSTEM = (lang: Lang) =>
   ` "related_hint": optional, one sentence naming an earlier item, digest or note of the owner (from "related") that this connects to. Leave it out if nothing connects.}\n` +
   `Judge by the owner's rules if they say what matters. When "length" is given and the key fact mentions how long the text is, use exactly the numbers in it and do not count yourself; mention only what it lists, and do not say where the numbers came from. Never state when the item was saved, in any field: the owner sees that beside the item, and a date or time written in the title or the text is part of the content, not the moment of saving (if it matters, report it as what the text says). Every field must be a finished thought that fits its limit: write shorter rather than be cut off. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.` +
   ` "content" is the author's own text. When "recognized_text" is given, it was recognized from the sound of the item's video: it is not the author's words and it may contain mistakes. Write "the video says …" when you rely on it, never present it as the author's text, and do not take a name or a number in it as fact. If the duration of a video is not given, do not state one.` +
-  ` ${languageRule(lang)}`;
+  ` ${languageRule(target)}`;
 
 /** The length of a text as a reader would count it: words for text written with spaces, characters for Chinese, Japanese and Korean. */
 export function textLength(text: string): { words: number; cjk_characters: number } {
@@ -196,8 +247,10 @@ export function shownText(body: string | null | undefined, recognized: string | 
 async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules: Awaited<ReturnType<typeof getRules>>, origin: string): Promise<Analysed> {
   const ctx = await getContext(env, actor, itemId, "analysis", origin);
   if (ctx.item.content_unavailable) return unavailable(itemId);
+  // The item's own words are its title, its text and what was recognized from its video: not the owner's rules, not a related item.
+  const target = analysisTarget(rules.lang as Lang, rules.always_my_language === true, [ctx.item.title, ctx.item.body, ctx.item.recognized_text].filter(Boolean).join("\n"));
   const facts = {
-    write_in: LANG_NAME[rules.lang as Lang],
+    write_in: target.name,
     kind: ctx.item.kind,
     title: ctx.item.title,
     site: ctx.item.site,
@@ -221,7 +274,6 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     contentFor = (correction) => [block, { type: "text", text: JSON.stringify(correction ? { ...facts, correction } : facts) }];
   }
   let why = "no reply";
-  const lang = rules.lang as Lang;
   // One budget for everything asked about this item: the first answer may take up to 25 seconds, the
   // correction gets what is left of the total (40 s unless ANALYSIS_BUDGET_MS says otherwise) and is
   // not asked for at all with less than 8 s left; at most 3 HTTP requests in all (two answers, and
@@ -239,7 +291,7 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   };
   let noEffort = false;
   const ask = async (correction?: string) => {
-    const r = await callModel(env, { timeoutMs: 25_000, budget, noEffort, maxTokens: 2000, system: ANALYSIS_SYSTEM(lang), content: contentFor(correction), onFailure: (reason) => (why = reason), onUnusedReply: paid });
+    const r = await callModel(env, { timeoutMs: 25_000, budget, noEffort, maxTokens: 2000, system: ANALYSIS_SYSTEM(target), content: contentFor(correction), onFailure: (reason) => (why = reason), onUnusedReply: paid });
     if (r) {
       paid(r);
       if (r.effortRefused) noEffort = true;
@@ -257,7 +309,7 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   // two that can, the one with fewer of the two flaws wins. With the same number the first stands, and
   // so it does when the second is not JSON, says "unavailable" or cannot be handed in: an item is never
   // called unreadable, nor loses an answer it could have had, for either flaw.
-  const flaws = (a: any) => ({ points: !hasPoints(a), language: wrongLanguageFields(lang, a).length > 0 });
+  const flaws = (a: any) => ({ points: !hasPoints(a), language: wrongLanguageFields(target.check, a).length > 0 });
   const worse = (a: any) => Number(flaws(a).points) + Number(flaws(a).language);
   const sound = (a: any) => Boolean(str(a.summary, LIMITS.analysis_summary_max_chars)) && VERDICTS.includes(a.verdict);
   const better = (y: any, x: any) => (sound(y) !== sound(x) ? sound(y) : worse(y) < worse(x));
@@ -266,7 +318,9 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     const timeLeft = budget.until - Date.now() >= Math.min(8_000, total / 2);
     if ((bad.points || bad.language) && timeLeft && budget.requests > 0) {
       const notes = [
-        bad.language ? `Your previous answer was not in ${LANG_NAME[lang]}. Write every text field in ${LANG_NAME[lang]}, translating from the item.` : "",
+        bad.language
+          ? `Your previous answer was not in ${target.name}. Write every text field in ${target.name}${target.from === "account" ? ", translating from the item" : ", and do not translate it into another language"}.`
+          : "",
         bad.points ? "Your previous answer had no key point. Give at least one complete sentence in \"points\"." : "",
       ].filter(Boolean);
       const again = await ask(notes.join(" "));
@@ -358,8 +412,8 @@ export async function analyseForUser(env: Env, userId: string, origin: string): 
   }
 }
 
-const DIGEST_SYSTEM = (lang: Lang) =>
-  `You write the owner's daily digest from the analyses of what they saved. Write in ${LANG_NAME[lang]}, whatever language the analyses are in: translate what you report. Plain text, no images, no tags, no long quotes. Answer with JSON only:\n` +
+const DIGEST_SYSTEM = (target: Target) =>
+  `You write the owner's daily digest from the analyses of what they saved. Write in ${target.name}${target.from === "account" ? ", whatever language the analyses are in: translate what you report" : " (most of the analyses are in it): do not translate it into another language"}. Plain text, no images, no tags, no long quotes. Answer with JSON only:\n` +
   `{"summary": a few sentences on what was saved, at most 600 characters;\n` +
   ` "worth": [{"item_id": string, "line": one sentence with the conclusion, at most 160 characters}] — only items whose verdict is worth_deep_dive and that the owner has not marked (signal is null) and has not queued;\n` +
   ` "question": one question to sleep on, at most 160 characters}`;
@@ -376,7 +430,8 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
   try {
     const day = claim.work[0].ref;
     const ctx = await getDigestContext(env, actor, day);
-    const reply = await callModel(env, { timeoutMs: 25_000, maxTokens: 4000, system: DIGEST_SYSTEM(user.lang), content: JSON.stringify(ctx) });
+    const target = digestTarget(user.lang, user.always_my_language === 1, ctx.analyses.filter((a) => !a.unavailable).map((a) => a.summary));
+    const reply = await callModel(env, { timeoutMs: 25_000, maxTokens: 4000, system: DIGEST_SYSTEM(target), content: JSON.stringify(ctx) });
     const x = reply ? (extractJson(reply.text) as any) : null;
     const summary = str(x?.summary, 600);
     const question = str(x?.question, 160);

@@ -89,6 +89,7 @@ async function* exportParts(cx: Cx): AsyncGenerator<string> {
       notify: user.notify === 1,
       timezone: user.timezone,
       lang: user.lang,
+      always_my_language: user.always_my_language === 1,
       roles: { analysis: role(user.role_analysis), digest: role(user.role_digest), deep_read: role(user.role_deep_read), deep_dive: role(user.role_deep_dive) },
       calendar_image_enabled: user.calendar_enabled === 1,
     },

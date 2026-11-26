@@ -11,6 +11,8 @@ export interface UserRow {
   email: string;
   timezone: string;
   lang: Lang;
+  /** 1: analyses and daily digests are always written in `lang`; 0: they follow the item's own language. */
+  always_my_language: number;
   storage_bytes: number;
   notify: number;
   rules: string;

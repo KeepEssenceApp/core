@@ -112,6 +112,18 @@ export async function signIn(env: Env, email = "ann@example.com", lang: "en" | "
   return { token: r.json.credential, deviceId: r.json.device.id, userId: r.json.user.id, email };
 }
 
+/**
+ * Signs in with "always use my language" on: for tests about the account's language (or that count model calls and
+ * must not be sent a second time for a language the account's own answer would have satisfied). The default is that
+ * an analysis follows the language of the item itself, which the tests of that rule leave on.
+ */
+export async function signInMine(env: Env, email = "ann@example.com", lang: "en" | "zh" = "en"): Promise<Session> {
+  const ann = await signIn(env, email, lang);
+  const r = await call(env, "PATCH", "/v1/settings", { token: ann.token, body: { always_my_language: true } });
+  if (r.status !== 200) throw new Error("switch failed " + r.text);
+  return ann;
+}
+
 /** Connects another client with a short code, approved by a manage device. */
 export async function connectDevice(env: Env, manager: Session, tier: "save" | "read" | "manage", client = "extension"): Promise<{ token: string; deviceId: string }> {
   const created = await call(env, "POST", "/v1/device-codes", { body: { device_name: `${tier} device`, client, requested_tier: tier } });

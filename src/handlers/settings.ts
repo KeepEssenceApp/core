@@ -16,6 +16,7 @@ function settingsView(user: UserRow, origin: string, manage: boolean) {
     notify: user.notify === 1,
     timezone: user.timezone,
     lang: user.lang,
+    always_my_language: user.always_my_language === 1,
     // The account's email, for the manage tier only: the web asks for it before deleting the account.
     ...(manage ? { email: user.email } : {}),
     roles: { analysis: user.role_analysis, digest: user.role_digest, deep_read: user.role_deep_read, deep_dive: user.role_deep_dive },
@@ -52,6 +53,7 @@ export const updateSettings: Handler = async (cx) => {
   if (b.expiry_options !== undefined) set("expiry_options", JSON.stringify([...new Set<number>(b.expiry_options)].sort((x, y) => x - y)));
   if (b.notify !== undefined) set("notify", b.notify ? 1 : 0);
   if (b.lang !== undefined) set("lang", b.lang);
+  if (b.always_my_language !== undefined) set("always_my_language", b.always_my_language ? 1 : 0);
   if (b.timezone !== undefined) {
     if (!validTimezone(b.timezone)) throw err("bad_request", "不认识这个时区。", "Unknown time zone.");
     set("timezone", b.timezone);

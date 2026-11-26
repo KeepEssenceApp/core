@@ -596,6 +596,7 @@ export async function getRules(env: Env, actor: AssistantActor, kind: WorkKind) 
     default_analysis_assistant: assistants.find((a) => a.id === user.role_analysis)?.name ?? null,
     expiry_options: parseJson<number[]>(user.expiry_options, LIMITS.expiry_options_default),
     lang: user.lang,
+    always_my_language: user.always_my_language === 1,
     timezone: user.timezone,
   };
 }
