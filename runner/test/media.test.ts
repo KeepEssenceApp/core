@@ -39,7 +39,11 @@ describe("which addresses are a video post", () => {
     const page = (raw: string) => ({ kind: "page", page: raw });
     const table: [string, unknown][] = [
       ["https://www.bilibili.com/video/BV1xx411c7mD", page("https://www.bilibili.com/video/BV1xx411c7mD")],
-      ["https://m.bilibili.com/video/BV1xx411c7mD?p=2", page("https://m.bilibili.com/video/BV1xx411c7mD?p=2")],
+      // A phone is sent to the mobile site with tracking in the address: the video's own page is what yt-dlp is asked for.
+      ["https://m.bilibili.com/video/BV1xx411c7mD?p=2", page("https://www.bilibili.com/video/BV1xx411c7mD?p=2")],
+      ["https://m.bilibili.com/video/BV1xx411c7mD?site=OVERSEAS&lang=zh-Hans", page("https://www.bilibili.com/video/BV1xx411c7mD")],
+      ["https://bilibili.com/video/BV1xx411c7mD/?spm_id_from=333.1007&vd_source=abc&p=x", page("https://www.bilibili.com/video/BV1xx411c7mD")],
+      ["https://www.bilibili.com/video/BV1xx411c7mD?p=3&share_source=copy_web", page("https://www.bilibili.com/video/BV1xx411c7mD?p=3")],
       ["https://www.bilibili.com/video/av170001", page("https://www.bilibili.com/video/av170001")],
       ["https://b23.tv/abcDEF", page("https://b23.tv/abcDEF")],
       ["https://video.weibo.com/show?fid=1034:4567", page("https://video.weibo.com/show?fid=1034:4567")],
