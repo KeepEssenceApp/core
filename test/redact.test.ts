@@ -51,6 +51,45 @@ describe("redact", () => {
     for (const [text, want] of cases) expect(masked(text), text).toBe(want);
   });
 
+  it("masks a one-time code typed next to its name, in either order, in English and Chinese (QA #78)", () => {
+    // Every code is made up.
+    const cases: Array<[string, string]> = [
+      ["my verification code is 482913, please help", "my verification code is [secret], please help"],
+      ["Verification Code: 482913", "Verification Code: [secret]"],
+      ["OTP: 071 358", "OTP: [secret]"],
+      ["otp 071-358 did not work", "otp [secret] did not work"],
+      ["the sign-in code 205817 was refused", "the sign-in code [secret] was refused"],
+      ["the login code was 205817", "the login code was [secret]"],
+      ["security code: 9042-1187", "security code: [secret]"],
+      ["my passcode is 4821", "my passcode is [secret]"],
+      ["one-time code 12345678", "one-time code [secret]"],
+      ["358204 is my login code", "[secret] is my login code"],
+      ["验证码是 649205", "验证码是 [secret]"],
+      ["验证码：649205，填进去还是不行", "验证码：[secret]，填进去还是不行"],
+      ["登录码 731904", "登录码 [secret]"],
+      ["482913 是我的验证码", "[secret] 是我的验证码"],
+      ["邮件里的动态码 073519", "邮件里的动态码 [secret]"],
+    ];
+    for (const [text, want] of cases) expect(masked(text), text).toBe(want);
+    // Counted with the credentials.
+    expect(redact("OTP 071358 and 验证码 649205").found).toEqual({ email: 0, phone: 0, secret: 2 });
+    // Only its own line: the next line is not the code's.
+    expect(masked("the verification code\n482913 is a number")).toBe("the verification code\n482913 is a number");
+  });
+
+  it("does not take other numbers near the word code for a one-time code", () => {
+    for (const plain of [
+      "error code 5012 on save",
+      "the code sent by email never came",
+      "I typed the sign-in code and it worked",
+      "the OTP page shows 2 boxes",
+      "hotpot 1234 and otpions 5678",
+      "the verification code field is empty on 2026-11-26",
+      "status code 503 after 20 minutes",
+      "验证码页面空白，等了 20 分钟",
+    ]) expect(masked(plain), plain).toBe(plain);
+  });
+
   it("leaves ordinary words alone, including ones that sit near the names of credentials", () => {
     for (const plain of [
       "the bearer authentication page is blank",

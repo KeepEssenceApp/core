@@ -174,7 +174,8 @@ What users sent with `POST /v1/feedback`, newest first. `forwarding` is the repo
 minute job, five times at most. The issue does not name the sender: it carries the `feedback id`,
 and the sender and the original text are read here in the portal. What the user typed goes into
 the issue with emails, phone numbers and anything that looks like a credential (`sk-…`, `ghp_…`,
-`Bearer …`, key blocks, `password: …`) masked, in the title as well, and a last line says how many
+`Bearer …`, key blocks, `password: …`, a one-time code typed next to its name such as
+`verification code 482913` or `验证码 482913`) masked, in the title as well, and a last line says how many
 were masked. `forward_error` is a status or a short reason with the same masking, and nothing of the
 text is logged. The masking errs on the side of masking, and it cannot know every secret: a
 repository that is read by people outside the operator's team is still the wrong place for it.

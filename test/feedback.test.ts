@@ -137,6 +137,37 @@ describe("feedback", () => {
     expect(stored).toMatchObject({ email: "ann@example.com", wrong: expect.stringContaining(FAKE.phoneUs), issue_url: "https://github.com/acme/feedback/issues/9" });
   });
 
+  it("a one-time code typed in any of the four fields is masked in the issue: 'verification code', OTP, 验证码 (QA #78)", async () => {
+    const sent: any[] = [];
+    const outbound: Outbound = async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return Response.json({ html_url: "https://github.com/acme/feedback/issues/14" }, { status: 201 });
+    };
+    const env = makeEnv({ ...GH, OUTBOUND: outbound });
+    const ann = await signIn(env);
+    // Every code is made up.
+    const codes = ["482913", "071 358", "649205", "731904", "205817", "9042-1187"];
+    const res = await call(env, "POST", "/v1/feedback", {
+      token: ann.token,
+      body: {
+        where: "web",
+        doing: `I asked for a sign-in code and it said 205817 was wrong; the old OTP: 071 358 also failed`,
+        wrong: `My verification code is 482913 and the page says it is invalid\n验证码是 649205，填进去还是不行`,
+        wish: `登录码 731904 不要让我再输一遍。 Security code: 9042-1187`,
+      },
+    });
+    expect(res.status).toBe(201);
+    expect(sent).toHaveLength(1);
+    const all = JSON.stringify(sent[0]);
+    for (const code of codes) expect(all, code).not.toContain(code);
+    expect(sent[0].title).toBe("[web] My verification code is [secret] and the page says it is invalid");
+    // The words around the masks stay, and the issue says how many were masked.
+    for (const kept of ["verification code", "OTP:", "验证码是", "登录码", "Security code:", "the page says it is invalid"]) expect(sent[0].body).toContain(kept);
+    expect(sent[0].body).toMatch(/Masked in this text: 6 secret\./);
+    // The operator still has what was typed, in the portal.
+    expect((await admin(env, "/admin/feedback")).json.feedback[0].wrong).toContain("482913");
+  });
+
   it("the title is masked before it is shortened, so a cut never leaves a part of a credential", async () => {
     const sent: any[] = [];
     const outbound: Outbound = async (_url, init) => {

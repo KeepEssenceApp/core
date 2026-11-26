@@ -1,7 +1,8 @@
 // Masks what must not leave this deployment inside free text a user typed: email addresses, phone
-// numbers and anything that looks like a credential. Used where such text is passed on to a place
-// the operator does not control alone (an issue tracker). It errs on the side of masking: a plain
-// word turned into a mask costs a moment of reading, a credential left in costs much more.
+// numbers, anything that looks like a credential and one-time codes typed next to their name. Used
+// where such text is passed on to a place the operator does not control alone (an issue tracker).
+// It errs on the side of masking: a plain word turned into a mask costs a moment of reading, a
+// credential left in costs much more.
 
 export type Kind = "email" | "phone" | "secret";
 export type Found = Record<Kind, number>;
@@ -34,6 +35,16 @@ const SECRETS: RegExp[] = [
   /\b(?:pass(?:word|wd|phrase)|pwd|secret|token|api[_-]?key|access[_-]?key|authorization|credentials?)\s*[:=]\s*(?!\[secret\])(?:(?:Bearer|Basic|Token)\s+)?(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi,
 ];
 
+// A one-time code someone read off a message and typed into the report: "my verification code is
+// 482913", "OTP: 071 358", "验证码是 649205", "358204 is my login code". The code is masked and the
+// words stay. It has no shape of its own (six digits are a date, a count, a port), so it is found
+// by the name next to it, in either order, within a short stretch of the same line. This is a
+// heuristic: a code written in words, or far from its name, is not found.
+const CODE_NAME = String.raw`(?:\b(?:(?:verification|verify|security|confirmation|activation|authentication|authorization|auth|access|sign[- ]?in|log[- ]?in|login|one[- ]time|2fa|mfa|sms|email)\s+(?:code|pin|passcode)|pin\s+code|otp|passcode)\b|验证码|校验码|登录码|登入码|动态码|安全码|确认码|一次性(?:密码|口令|验证码))`;
+const CODE_VALUE = String.raw`\d(?:[ -]?\d){3,9}`;
+const CODE_AFTER = new RegExp(String.raw`(${CODE_NAME}[^\n\d]{0,30}?)(?<![\w])${CODE_VALUE}(?![\w])`, "gi");
+const CODE_BEFORE = new RegExp(String.raw`(?<![\w])${CODE_VALUE}(?![\w])(?=[^\n\d]{0,24}?${CODE_NAME})`, "gi");
+
 // Address: letters and digits (any script), dots and the like before the @, a domain with a dot after.
 const EMAIL = /[\p{L}\p{N}._%+'-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/gu;
 
@@ -58,6 +69,16 @@ export function redact(text: string, exact: Array<string | null | undefined> = [
       return MASK.secret;
     });
   }
+  out = out.replace(CODE_AFTER, (m, lead: string) => {
+    if (DATE.test(m.slice(lead.length).trim())) return m;
+    found.secret++;
+    return lead + MASK.secret;
+  });
+  out = out.replace(CODE_BEFORE, (m) => {
+    if (DATE.test(m.trim())) return m;
+    found.secret++;
+    return MASK.secret;
+  });
   out = out.replace(EMAIL, () => {
     found.email++;
     return MASK.email;
