@@ -35,6 +35,7 @@ LANGS: Dict[str, Optional[str]] = {"auto": None, "zh": "zh", "en": "en"}
 CHUNK = 64 * 1024
 BODY_DEADLINE = 120.0  # seconds to receive a whole body, however slowly it comes
 DRAIN_LIMIT = 1024 * 1024  # what is read and thrown away after an early refusal, so the answer is not lost to a reset
+LINGER_SECONDS = 2.0  # how long a connection that sent a body of unknown length is listened to after the answer
 
 
 def stdout_log(line: str) -> None:
@@ -192,7 +193,10 @@ def make_handler(app: App) -> type:
             app.log(json.dumps(line))
             try:
                 self._json(status, payload)
-                self._drain(drain)
+                if self._unread == 0 and "Transfer-Encoding" in self.headers:
+                    self._linger(drain)
+                else:
+                    self._drain(drain)
             except OSError:
                 pass  # the client went away
 
@@ -207,6 +211,24 @@ def make_handler(app: App) -> type:
                     break
                 remaining -= len(chunk)
                 self._unread -= len(chunk)
+
+        def _linger(self, limit: int) -> None:
+            """A body whose length is not known (chunked) cannot be drained by its length. Say that nothing more is coming
+            from us, then read and throw away what the client is still sending, until it has read the answer and closes, goes
+            quiet for LINGER_SECONDS, or has sent `limit` bytes. Closing at once would reset the connection under the body on
+            its way, and the reset can take the answer with it."""
+            self.connection.shutdown(socket.SHUT_WR)
+            self.connection.settimeout(LINGER_SECONDS)
+            remaining = limit
+            deadline = time.monotonic() + 10
+            try:
+                while remaining > 0 and time.monotonic() < deadline:
+                    chunk = self.rfile.read1(min(CHUNK, remaining))
+                    if not chunk:
+                        break  # the client has closed: it has the answer
+                    remaining -= len(chunk)
+            except socket.timeout:
+                pass  # it went quiet: it is waiting for us, and has had the answer for a while
 
         # -- routes
         def do_GET(self) -> None:

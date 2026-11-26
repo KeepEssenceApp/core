@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import os
 import threading
 import time
@@ -221,6 +222,35 @@ class BadInputTests(ServerCase):
         res = conn.getresponse()
         self.assertEqual((res.status, json.loads(res.read())), (411, {"error": "length_required"}))
         conn.close()
+
+    def test_the_411_does_not_cut_off_a_chunked_body_that_is_still_on_its_way(self) -> None:
+        # The server answers 411 as soon as it has the headers, and cannot know how long a chunked body is. If it closed
+        # then, the body still on its way would meet a closed socket: a reset, a BrokenPipeError in the client, and an
+        # answer that can be lost with it. That was a race that CI sometimes lost. Here the body is sent only after the
+        # answer has been read, so the old behaviour fails every time instead of now and then.
+        h = self.start()
+        wav = make_wav()
+        sock = socket.create_connection(("127.0.0.1", h.port), timeout=10)
+        try:
+            sock.sendall(("POST /transcribe HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + SECRET + "\r\nContent-Type: audio/wav\r\n"
+                          "Transfer-Encoding: chunked\r\n\r\n").encode("ascii"))
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += sock.recv(65536)
+            head, _, body = data.partition(b"\r\n\r\n")
+            length = int([l.split(b":")[1] for l in head.split(b"\r\n") if l.lower().startswith(b"content-length")][0])
+            while len(body) < length:
+                body += sock.recv(65536)
+            self.assertTrue(head.startswith(b"HTTP/1.1 411 "), head[:60])
+            self.assertEqual(json.loads(body), {"error": "length_required"})
+            # The rest of the body, now: it must be taken, not refused.
+            sock.sendall(("%x\r\n" % len(wav)).encode("ascii") + wav + b"\r\n")
+            time.sleep(0.2)
+            sock.sendall(b"0\r\n\r\n")
+        finally:
+            sock.close()
+        self.assertEqual(self.engine.calls, [])
+        self.assertEqual(h.files_left(), [])
 
     def test_a_body_that_stops_short_is_400_and_leaves_no_file(self) -> None:
         h = self.start()
