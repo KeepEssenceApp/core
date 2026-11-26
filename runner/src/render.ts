@@ -159,7 +159,8 @@ async function postOf(page: Page, url: string): Promise<Post | null> {
       const state = (window as unknown as { __INITIAL_STATE__?: { noteData?: { data?: { noteData?: Record<string, any> } } } }).__INITIAL_STATE__;
       const note = state?.noteData?.data?.noteData;
       if (!note || typeof note !== "object") return null;
-      const clean = (v: unknown) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "");
+      // The site writes a topic as `#阳台[话题]#`; the marker is its own, not the author's.
+      const clean = (v: unknown) => (typeof v === "string" ? v.replace(/\[话题\]/g, "").replace(/\s+/g, " ").trim() : "");
       const title = clean(note.title);
       const text = [title, clean(note.user?.nickName ?? note.user?.nickname), clean(note.desc)].filter(Boolean).join("\n");
       return text ? { title, text } : null;
