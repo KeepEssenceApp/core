@@ -80,6 +80,23 @@ npx playwright-core install chromium      # on Linux: add --with-deps (needs sud
 RUNNER_KEY=… npm start
 ```
 
+### Updating it
+
+The runner machine holds a copy of this folder and of the two files it imports from the core, not a checkout.
+To move it to a newer commit, from a checkout of `main`:
+
+```
+HOST=<the runner machine>
+ssh $HOST 'cp -a ~/ke-runner ~/ke-runner.prev'             # the way back
+rsync -a --delete --exclude node_modules runner/ $HOST:ke-runner/runner/
+rsync -a src/services/pagerules.ts src/services/publicurl.ts $HOST:ke-runner/src/services/
+ssh $HOST "cd ~/ke-runner/runner && npm ci && git -C <checkout> rev-parse --short HEAD > ../VERSION && systemctl --user restart ke-runner"
+```
+
+Then check it the way the first time was checked: no key → 401, the key on a public page → 200, an internal
+address → 400. To go back: put `~/ke-runner.prev` back and restart. The tunnel (`ke-runner-tunnel`) needs no
+restart.
+
 ### Behind a Cloudflare Tunnel
 
 The core runs on Cloudflare and cannot reach a tailnet, so the runner is exposed with `cloudflared`
