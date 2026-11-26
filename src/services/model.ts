@@ -8,6 +8,17 @@ export interface ModelReply {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** The gateway answered 400 to the `effort` field and the request was sent again without it: do not ask for it again. */
+  effortRefused?: boolean;
+}
+
+/**
+ * What several requests for one piece of work may use together: until when (Date.now() milliseconds)
+ * and how many HTTP requests. Each request takes from it, so a second ask does not get a fresh deadline.
+ */
+export interface ModelBudget {
+  until: number;
+  requests: number;
 }
 
 export type ContentBlock =
@@ -20,6 +31,10 @@ export interface ModelRequest {
   content: string | ContentBlock[];
   maxTokens: number;
   timeoutMs: number;
+  /** Shared with the other requests for the same piece of work: the time limit is the least of `timeoutMs` and what is left of it. */
+  budget?: ModelBudget;
+  /** Do not send the `effort` field (an earlier request found that the gateway refuses it). */
+  noEffort?: boolean;
   /** Told why there is no reply (for the log). Never contains content or the key. */
   onFailure?: (reason: string) => void;
 }
@@ -38,8 +53,17 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
   if (!env.LLM_API_KEY) return fail("no credential");
   const base = (env.LLM_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
   const model = env.LLM_MODEL || DEFAULT_MODEL;
+  const timeoutMs = req.budget ? Math.min(req.timeoutMs, req.budget.until - Date.now()) : req.timeoutMs;
+  if (timeoutMs <= 0) return fail("time budget spent");
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), req.timeoutMs);
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  /** One HTTP request's worth of the budget. */
+  const take = () => {
+    if (!req.budget) return true;
+    if (req.budget.requests <= 0) return false;
+    req.budget.requests--;
+    return true;
+  };
   const send = (extra: Record<string, unknown>) =>
     outbound(env, `${base}/v1/messages`, {
       method: "POST",
@@ -61,9 +85,13 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
   try {
     // These are short, routine jobs: ask for low effort. A gateway that does not know the
     // field answers 400; then ask once more without it.
-    let response = await send({ output_config: { effort: "low" } });
-    if (response.status === 400) {
+    let effortRefused = false;
+    if (!take()) return fail("request budget spent");
+    let response = await send(req.noEffort ? {} : { output_config: { effort: "low" } });
+    if (response.status === 400 && !req.noEffort) {
       await response.body?.cancel().catch(() => {});
+      if (!take()) return fail("request budget spent");
+      effortRefused = true;
       response = await send({});
     }
     if (!response.ok) {
@@ -88,9 +116,10 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
         (Number(data.usage?.cache_creation_input_tokens) || 0) +
         (Number(data.usage?.cache_read_input_tokens) || 0),
       outputTokens: Number(data.usage?.output_tokens) || 0,
+      ...(effortRefused ? { effortRefused } : {}),
     };
   } catch (e) {
-    return fail(abort.signal.aborted ? `no reply within ${req.timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
+    return fail(abort.signal.aborted ? `no reply within ${timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
   } finally {
     clearTimeout(timer);
   }

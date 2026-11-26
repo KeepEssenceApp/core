@@ -5,9 +5,9 @@ import { now } from "./clock";
 import { LIMITS, num, type Env } from "./env";
 import type { Lang } from "./errors";
 import { builtinActor, getUser } from "./services/accounts";
-import { callModel, extractJson, modelConfigured, type ContentBlock } from "./services/model";
+import { callModel, extractJson, modelConfigured, type ContentBlock, type ModelBudget } from "./services/model";
 import { digestDue } from "./services/digests";
-import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, getContext, getDigestContext, getRules, noteAnalysisFailure, releaseClaim, submitResults, type UsageInput } from "./services/work";
+import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, getContext, getDigestContext, getRules, noteAnalysisFailure, recordUnsubmittedUsage, releaseClaim, submitResults, type UsageInput } from "./services/work";
 import type { AssistantActor, UserRow } from "./types";
 import { shorten, truncate } from "./util";
 
@@ -91,26 +91,53 @@ const languageRule = (lang: Lang) =>
   `Every text field you write (summary, key_fact, points, related_hint) is in ${LANG_NAME[lang]}, whatever language the item, its title or the owner's rules are written in: ` +
   `translate what you report, do not answer in the item's language. Names and short quotations may stay as they are.`;
 
-/** The share of Chinese characters among the letters of a text; null when there are no letters to judge by. */
-function hanShare(text: string): number | null {
-  const han = text.match(/[\u3400-\u9fff]/g)?.length ?? 0;
-  const latin = text.match(/[A-Za-z]/g)?.length ?? 0;
-  return han + latin === 0 ? null : han / (han + latin);
+/** Letters by script: Latin, Han, kana, and everything else (Hangul, Cyrillic, Arabic ...). */
+function scriptsOf(text: string): { letters: number; latin: number; han: number; foreign: number } {
+  // What is not the writer's own words is left out: addresses and quotations (a quoted title may be in any language).
+  const own = text
+    .replace(/https?:\/\/\S+|[\w.+-]+@[\w-]+\.[\w.-]+/g, " ")
+    .replace(/“[^”]*”|"[^"]*"|「[^」]*」|『[^』]*』|《[^》]*》|«[^»]*»/g, " ");
+  let latin = 0;
+  let han = 0;
+  let foreign = 0;
+  for (const ch of own) {
+    if (!/\p{L}/u.test(ch)) continue;
+    if (/\p{Script=Latin}/u.test(ch)) latin++;
+    else if (/\p{Script=Han}/u.test(ch)) han++;
+    else foreign++; // kana, Hangul, Cyrillic ...: neither English nor Chinese
+  }
+  return { letters: latin + han + foreign, latin, han, foreign };
 }
+
+/** Fewer letters than this is a name, an acronym or a short quotation (PDF 3 页, 张伟, "ok"): it is not judged. */
+const MIN_JUDGED_LETTERS = 5;
 
 /**
- * Is this prose in the language the owner reads? Judged by the script: mostly Chinese characters for
- * 简体中文, mostly Latin letters for English. Text with no letters (numbers, symbols) passes, and so
- * does a mixed text that quotes a few words of the other language.
+ * Is this one text in the language the owner reads? A judgement by script, **a heuristic, not language
+ * identification**: for English, less than 30% of the letters are Chinese characters, kana or other
+ * non-Latin script; for 简体中文, at least 30% are Chinese characters and less than 20% are kana or other
+ * non-Latin, non-Chinese script (so Japanese does not pass). Numbers, symbols, addresses and quoted words
+ * are left out, and so is a text with fewer than five letters. Judge each field on its own: a long answer
+ * in the right language in one field must not hide another field written in the wrong one.
  */
-export function writtenIn(lang: Lang, prose: string): boolean {
-  const share = hanShare(prose);
-  if (share === null) return true;
-  return lang === "zh" ? share >= 0.3 : share < 0.3;
+export function writtenIn(lang: Lang, text: string): boolean {
+  const { letters, han, foreign } = scriptsOf(text);
+  if (letters < MIN_JUDGED_LETTERS) return true;
+  return lang === "zh" ? han / letters >= 0.3 && foreign / letters < 0.2 : (han + foreign) / letters < 0.3;
 }
 
-const proseOf = (x: any): string =>
-  [x?.summary, x?.key_fact, ...(Array.isArray(x?.points) ? x.points : []), x?.related_hint].filter((v) => typeof v === "string").join("\n");
+/** The text fields of an analysis, by name. */
+const fieldsOf = (x: any): [string, string][] => [
+  ["summary", x?.summary],
+  ["key_fact", x?.key_fact],
+  ...(Array.isArray(x?.points) ? x.points.map((p: unknown, i: number): [string, unknown] => [`points[${i}]`, p]) : []),
+  ["related_hint", x?.related_hint],
+].filter((f): f is [string, string] => typeof f[1] === "string" && f[1].trim() !== "");
+
+/** The fields of an answer that are not in the language, by name. Empty when every field is. */
+export function wrongLanguageFields(lang: Lang, x: any): string[] {
+  return fieldsOf(x).filter(([, text]) => !writtenIn(lang, text)).map(([name]) => name);
+}
 
 const hasPoints = (x: any): boolean => Array.isArray(x?.points) && x.points.some((p: unknown) => typeof p === "string" && p.trim());
 
@@ -136,9 +163,11 @@ function nonZero(length: { words: number; cjk_characters: number }): Record<stri
   return Object.fromEntries(Object.entries(length).filter(([, n]) => n > 0));
 }
 
-type Analysed = { result: Record<string, unknown>; usage: { input: number; output: number; model: string } | null } | { failure: string };
+/** What was paid for one item: every model reply that came back, whether or not it was used. */
+type Spent = { input: number; output: number; model: string; calls: number };
+type Analysed = { result: Record<string, unknown>; usage: Spent | null } | { failure: string; usage?: Spent | null };
 
-const unavailable = (itemId: string, usage: { input: number; output: number; model: string } | null = null): Analysed => ({
+const unavailable = (itemId: string, usage: Spent | null = null): Analysed => ({
   result: { kind: "analysis", item_id: itemId, unavailable: true },
   usage,
 });
@@ -180,39 +209,57 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   }
   let why = "no reply";
   const lang = rules.lang as Lang;
-  const ask = (correction?: string) =>
-    callModel(env, { timeoutMs: 25_000, maxTokens: 2000, system: ANALYSIS_SYSTEM(lang), content: contentFor(correction), onFailure: (reason) => (why = reason) });
-  let reply = await ask();
-  if (!reply) return { failure: why };
-  let usage = { input: reply.inputTokens, output: reply.outputTokens, model: reply.model };
-  let x = extractJson(reply.text) as any;
-  // An answer is asked for once more when it has no key point (QA #69) or is not in the language
-  // the owner reads (QA #18, core#2). The second answer replaces the first only when it is better;
-  // otherwise the first stands: an item is never called unreadable for either.
-  const flaws = (a: any) => ({ points: !hasPoints(a), language: !writtenIn(lang, proseOf(a)) });
+  // One budget for everything asked about this item: the first answer may take up to 25 seconds, the
+  // correction gets what is left of the total (40 s unless ANALYSIS_BUDGET_MS says otherwise) and is
+  // not asked for at all with less than 8 s left; at most 3 HTTP requests in all (two answers, and
+  // one more if the gateway refuses the `effort` field once). Best effort: it does not promise that a
+  // second answer is compliant, only that the whole costs a bounded time and number of requests.
+  const total = num(env.ANALYSIS_BUDGET_MS, 40_000);
+  const budget: ModelBudget = { until: Date.now() + total, requests: 3 };
+  // Every reply that comes back is paid for, whether or not it is the one that is used.
+  const spent: Spent = { input: 0, output: 0, model: "", calls: 0 };
+  const paid = (r: { inputTokens: number; outputTokens: number; model: string }) => {
+    spent.input += r.inputTokens;
+    spent.output += r.outputTokens;
+    spent.model = r.model;
+    spent.calls++;
+  };
+  let noEffort = false;
+  const ask = async (correction?: string) => {
+    const r = await callModel(env, { timeoutMs: 25_000, budget, noEffort, maxTokens: 2000, system: ANALYSIS_SYSTEM(lang), content: contentFor(correction), onFailure: (reason) => (why = reason) });
+    if (r) {
+      paid(r);
+      if (r.effortRefused) noEffort = true;
+    }
+    return r;
+  };
+  const used = (): Spent | null => (spent.calls > 0 ? { ...spent } : null);
+  const first = await ask();
+  if (!first) return { failure: why };
+  let x = extractJson(first.text) as any;
+  // An answer is asked for once more when it has no key point (QA #69) or a field is not in the
+  // language the owner reads (QA #18, core#2). The second answer replaces the first only when it is
+  // better (fewer of the two flaws); with the same number the first stands, and so it does when the
+  // second is not JSON or says "unavailable": an item is never called unreadable for either flaw.
+  const flaws = (a: any) => ({ points: !hasPoints(a), language: wrongLanguageFields(lang, a).length > 0 });
+  const worse = (a: any) => Number(flaws(a).points) + Number(flaws(a).language);
   if (x && typeof x === "object" && x.unavailable !== true) {
     const bad = flaws(x);
-    if (bad.points || bad.language) {
+    const timeLeft = budget.until - Date.now() >= Math.min(8_000, total / 2);
+    if ((bad.points || bad.language) && timeLeft && budget.requests > 0) {
       const notes = [
         bad.language ? `Your previous answer was not in ${LANG_NAME[lang]}. Write every text field in ${LANG_NAME[lang]}, translating from the item.` : "",
         bad.points ? "Your previous answer had no key point. Give at least one complete sentence in \"points\"." : "",
       ].filter(Boolean);
       const again = await ask(notes.join(" "));
       const y = again ? (extractJson(again.text) as any) : null;
-      if (again && y && typeof y === "object" && y.unavailable !== true) {
-        const worse = (a: any) => Number(flaws(a).points) + Number(flaws(a).language);
-        usage = { input: usage.input + again.inputTokens, output: usage.output + again.outputTokens, model: again.model };
-        if (worse(y) < worse(x)) {
-          reply = again;
-          x = y;
-        }
-      }
+      if (y && typeof y === "object" && y.unavailable !== true && worse(y) < worse(x)) x = y;
     }
   }
-  if (!x || typeof x !== "object") return { failure: "the reply is not JSON" };
-  if (x.unavailable === true) return unavailable(itemId, usage);
+  if (!x || typeof x !== "object") return { failure: "the reply is not JSON", usage: used() };
+  if (x.unavailable === true) return unavailable(itemId, used());
   const summary = str(x.summary, LIMITS.analysis_summary_max_chars);
-  if (!summary || !VERDICTS.includes(x.verdict)) return { failure: "the reply lacks a summary or a verdict" };
+  if (!summary || !VERDICTS.includes(x.verdict)) return { failure: "the reply lacks a summary or a verdict", usage: used() };
   const result: Record<string, unknown> = {
     kind: "analysis",
     item_id: itemId,
@@ -224,7 +271,7 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   if (keyFact) result.key_fact = keyFact;
   const hint = str(x.related_hint, 200);
   if (hint) result.related_hint = hint;
-  return { result, usage };
+  return { result, usage: used() };
 }
 
 /** What the user reads when the built-in assistant gave up on an item. */
@@ -249,7 +296,7 @@ export async function analyseForUser(env: Env, userId: string, origin: string): 
     const tried = await Promise.all(
       claim.work.map((w) => analyseOne(env, actor, w.ref, rules, origin).catch((e): Analysed => ({ failure: `error: ${e instanceof Error ? e.message : String(e)}` }))),
     );
-    const done: { result: Record<string, unknown>; usage: { input: number; output: number; model: string } | null }[] = [];
+    const done: { result: Record<string, unknown>; usage: Spent | null }[] = [];
     for (const [i, outcome] of tried.entries()) {
       if ("result" in outcome) {
         done.push(outcome);
@@ -267,17 +314,21 @@ export async function analyseForUser(env: Env, userId: string, origin: string): 
       console.warn(`analysis of ${itemId} failed (attempt ${attempts} of ${limit}): ${outcome.failure}${last ? "; handed in as unreadable" : ""}`);
       if (last) done.push({ result: { kind: "analysis", item_id: itemId, unavailable: true, summary: COULD_NOT_READ[rules.lang as Lang] ?? COULD_NOT_READ.en }, usage: null });
     }
+    // Every reply the model sent back was paid for, an item's discarded second answer and an item that
+    // failed included: the usage is the sum of what every item cost.
+    const spent = tried.flatMap((o) => (o.usage ? [o.usage] : []));
+    const usage: UsageInput = {
+      model: spent[0]?.model,
+      input_tokens: spent.reduce((n, u) => n + u.input, 0),
+      output_tokens: spent.reduce((n, u) => n + u.output, 0),
+      calls: spent.reduce((n, u) => n + u.calls, 0),
+    };
     let accepted = 0;
     if (done.length > 0) {
-      const calls = done.filter((d) => d.usage);
-      const usage: UsageInput = {
-        model: calls[0]?.usage?.model,
-        input_tokens: calls.reduce((n, d) => n + (d.usage?.input ?? 0), 0),
-        output_tokens: calls.reduce((n, d) => n + (d.usage?.output ?? 0), 0),
-        calls: calls.length,
-      };
       const { outcomes } = await submitResults(env, actor, claim.claim_id, done.map((d) => d.result), usage, user.lang);
       accepted = outcomes.filter((o) => o.accepted).length;
+    } else if (usage.calls) {
+      await recordUnsubmittedUsage(env, actor, claim.claim_id, "analysis", usage);
     }
     // Whatever was not handed in goes back for the next round.
     if (accepted < claim.work.length) await releaseClaim(env, actor, claim.claim_id);

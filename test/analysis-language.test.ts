@@ -2,9 +2,9 @@
 // item is in, in both directions, and also straight after the language was changed. The model is a
 // stand-in that (like the real one) mirrors the item's language unless it is told to translate.
 import { describe, expect, it } from "vitest";
-import { writtenIn } from "../src/builtin";
+import { writtenIn, wrongLanguageFields } from "../src/builtin";
 import { runMinute } from "../src/cron";
-import { builtinModel, call, db, LLM, makeEnv, saveText, signIn } from "./helpers";
+import { builtinModel, call, db, LLM, makeEnv, saveText, signIn, type Outbound } from "./helpers";
 
 const ZH_TEXT = "中文测试笔记：明天上午十点和产品团队开会，讨论新版本的发布计划，请提前准备演示文稿。";
 const EN_TEXT = "Cedar team note: the release plan is due on Friday, and the slides need one more pass before the review.";
@@ -183,5 +183,219 @@ describe("core#2: telling the language by its script", () => {
   it("text with no letters cannot be judged and passes", () => {
     expect(writtenIn("en", "")).toBe(true);
     expect(writtenIn("zh", "12 / 34 — 5.6%")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- the review of core#5 (QA #18, 2026-11-26)
+
+type Step = { json?: unknown; text?: string; status?: number; hang?: boolean; delay?: number; usage?: [number, number] };
+type Asked = { effort: boolean; correction: string | undefined };
+
+/**
+ * A model whose analysis answers are scripted one after the other (the last one repeats), each with its
+ * own token counts, so that what is paid for can be told apart. Triage and digest are answered plainly.
+ */
+function scripted(steps: Step[], asked: Asked[] = []): Outbound {
+  let n = 0;
+  return async (url, init) => {
+    if (!url.endsWith("/v1/messages")) return new Response("not stubbed: " + url, { status: 599 });
+    const request = JSON.parse(String(init?.body));
+    const content = request.messages[0].content;
+    const input = JSON.parse(typeof content === "string" ? content : content.find((b: any) => b.type === "text").text);
+    const reply = (value: unknown, usage: [number, number] = [120, 40]) =>
+      Response.json({ id: "m", type: "message", role: "assistant", model: request.model, stop_reason: "end_turn", content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }], usage: { input_tokens: usage[0], output_tokens: usage[1] } });
+    if (request.system.startsWith("You sort")) return reply(input.items.map((i: any) => ({ item_id: i.item_id })));
+    if (!request.system.startsWith("You analyse")) return reply({ summary: "A day.", worth: [], question: "What next?" });
+    asked.push({ effort: Boolean(request.output_config), correction: input.correction });
+    const step = steps[Math.min(n++, steps.length - 1)];
+    if (step.delay) await new Promise((r) => setTimeout(r, step.delay));
+    if (step.hang) return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+    if (step.status) return new Response("no", { status: step.status });
+    return reply(step.text ?? step.json, step.usage);
+  };
+}
+
+const paid = async (env: any) => (await db(env, "SELECT COALESCE(SUM(input_tokens),0) AS i, COALESCE(SUM(output_tokens),0) AS o, COALESCE(SUM(calls),0) AS calls, COALESCE(SUM(items),0) AS items FROM usage_records WHERE kind = 'analysis'"))[0];
+const analysed = async (env: any) => (await db(env, "SELECT summary, unavailable FROM analyses"))[0];
+
+describe("core#5 review: every field is judged on its own", () => {
+  const longEnglish = "The team will complete the release checklist and review the remaining accessibility work before Friday.";
+
+  it("a long answer in the right language in one field does not hide a field in the wrong one (English account)", () => {
+    const mixed = { summary: longEnglish, key_fact: "Text, 38 Chinese characters", points: ["请在星期五前提交修改。"], verdict: "good_to_know" };
+    expect(wrongLanguageFields("en", mixed)).toEqual(["points[0]"]);
+    expect(wrongLanguageFields("en", { ...mixed, points: ["Fine."], related_hint: "与上周的发布清单有关" })).toEqual(["related_hint"]);
+    expect(wrongLanguageFields("en", { ...mixed, points: [longEnglish, "请在星期五前提交修改。"] })).toEqual(["points[1]"]);
+  });
+
+  it("and the other way round (Chinese account), and prose that is entirely kana or Hangul is neither", () => {
+    const zhLong = "团队会在周五之前完成发布清单，并且检查剩下的无障碍改进工作。";
+    expect(wrongLanguageFields("zh", { summary: zhLong, key_fact: "文本，约 38 个字", points: ["Please send the changes before Friday."] })).toEqual(["points[0]"]);
+    expect(wrongLanguageFields("en", { summary: longEnglish, points: ["これは金曜日までに提出する修正についてのメモです。"] })).toEqual(["points[0]"]);
+    expect(wrongLanguageFields("zh", { summary: zhLong, points: ["これは金曜日までに提出する修正についてのメモです。"] })).toEqual(["points[0]"]);
+    expect(wrongLanguageFields("en", { summary: longEnglish, points: ["이것은 금요일까지 제출할 수정 사항에 대한 메모입니다."] })).toEqual(["points[0]"]);
+    expect(wrongLanguageFields("zh", { summary: zhLong, points: ["Это заметка об изменениях, которые нужно сдать до пятницы."] })).toEqual(["points[0]"]);
+  });
+
+  it("numbers, names, acronyms, addresses and quoted titles are allowed in any field", () => {
+    expect(wrongLanguageFields("en", { summary: `${longEnglish} Ask 张伟 about it.`, key_fact: "38", points: ["See https://example.org/发布清单 for the list.", "The note is titled “发布清单检查表”.", "PDF"], related_hint: "Connects to “本周的发布计划”." })).toEqual([]);
+    expect(wrongLanguageFields("zh", { summary: "团队会在周五之前完成发布清单，并且检查剩下的工作。", key_fact: "PDF，3 页", points: ["详见 https://example.org/checklist，标题是 “Release checklist”。", "联系 Anna，邮箱 anna@example.org。"] })).toEqual([]);
+    expect(wrongLanguageFields("en", {})).toEqual([]);
+  });
+
+  it("a wrong field in a long answer is corrected by the second call, and the corrected answer is stored", async () => {
+    const mixed = { summary: longEnglish, key_fact: "Text, 38 Chinese characters", points: ["请在星期五前提交修改。"], verdict: "good_to_know" };
+    const asked: Asked[] = [];
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: mixed, usage: [100, 30] }, { json: english, usage: [130, 35] }], asked) });
+    const ann = await signIn(env);
+    await saveText(env, ann.token, ZH_TEXT);
+    await runMinute(env);
+    expect(asked).toHaveLength(2);
+    expect(asked[1].correction).toContain("not in English");
+    expect((await stored(env, await itemIdOf(env, ZH_TEXT))).points).toBe(JSON.stringify(english.points));
+    expect(await paid(env)).toEqual({ i: 230, o: 65, calls: 2, items: 1 });
+  });
+
+  it("a mixed answer that only quotes a name or a title is one call", async () => {
+    const quoting = { summary: longEnglish, key_fact: "Text, 38 Chinese characters", points: ["Ask 张伟 about the “发布清单”."], verdict: "good_to_know" };
+    const asked: Asked[] = [];
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: quoting }], asked) });
+    const ann = await signIn(env);
+    await saveText(env, ann.token, ZH_TEXT);
+    await runMinute(env);
+    expect(asked).toHaveLength(1);
+    expect(await paid(env)).toMatchObject({ calls: 1, items: 1 });
+  });
+});
+
+describe("core#5 review: every reply that came back is counted", () => {
+  const wrong = { ...chinese };
+
+  const seconds: [string, Step][] = [
+    ["is prose, not JSON", { text: "Sorry, here is the analysis in prose." }],
+    ["says unavailable", { json: { unavailable: true } }],
+    ["is a JSON array", { json: [] }],
+    ["has no verdict or points", { json: { summary: "No verdict or points." } }],
+  ];
+  for (const [name, second] of seconds) {
+    it(`a second reply that ${name} is paid for, and the first answer stands`, async () => {
+      const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: wrong, usage: [100, 30] }, { ...second, usage: [140, 25] }]) });
+      const ann = await signIn(env);
+      await saveText(env, ann.token, ZH_TEXT);
+      await runMinute(env);
+      expect((await analysed(env)).summary).toBe(chinese.summary);
+      expect(await paid(env)).toEqual({ i: 240, o: 55, calls: 2, items: 1 });
+    });
+  }
+
+  it("a first reply that is not JSON is paid for too, though nothing is handed in; the item is tried again", async () => {
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ text: "not json at all", usage: [111, 22] }]) });
+    const ann = await signIn(env);
+    await saveText(env, ann.token, ZH_TEXT);
+    await runMinute(env);
+    expect(await db(env, "SELECT COUNT(*) AS n FROM analyses")).toEqual([{ n: 0 }]);
+    expect(await paid(env)).toEqual({ i: 111, o: 22, calls: 1, items: 0 });
+    // The claim went back: the next round asks again and pays again.
+    await runMinute(env);
+    expect(await paid(env)).toMatchObject({ i: 222, o: 44, calls: 2 });
+  });
+
+  it("two items in one round: what each cost is added up, the discarded second answer of one included", async () => {
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: english, usage: [100, 10] }, { json: english, usage: [100, 10] }]) });
+    const ann = await signIn(env);
+    await saveText(env, ann.token, EN_TEXT);
+    await saveText(env, ann.token, EN_TEXT + " Second.");
+    await runMinute(env);
+    expect(await paid(env)).toEqual({ i: 200, o: 20, calls: 2, items: 2 });
+  });
+});
+
+describe("core#5 review: a correction that fixes one flaw and loses another", () => {
+  const noPointsEnglish = { ...english, points: [] };
+  const noPointsChinese = { ...chinese, points: [] };
+
+  it("equal numbers of flaws keep the first answer: right language without a key point, then a key point in the wrong language", async () => {
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: noPointsEnglish }, { json: chinese }]) });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    expect((await stored(env, await itemIdOf(env, ZH_TEXT))).points).toBe("[]");
+    expect((await analysed(env)).summary).toBe(english.summary);
+    expect(await paid(env)).toMatchObject({ calls: 2 });
+  });
+
+  it("equal numbers of flaws keep the first answer: a key point in the wrong language, then the right language without one", async () => {
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: chinese }, { json: noPointsEnglish }]) });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    expect((await analysed(env)).summary).toBe(chinese.summary);
+    expect((await stored(env, await itemIdOf(env, ZH_TEXT))).points).toBe(JSON.stringify(chinese.points));
+    expect(await paid(env)).toMatchObject({ calls: 2 });
+  });
+
+  it("a correction that has fewer flaws replaces the first answer, even when it still has one", async () => {
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: noPointsChinese }, { json: noPointsEnglish }]) });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    expect((await analysed(env)).summary).toBe(english.summary);
+  });
+});
+
+describe("core#5 review: one bounded budget for everything asked about an item", () => {
+  it("a gateway that refuses the effort field costs one extra request once, not one per call: three requests at most", async () => {
+    const asked: Asked[] = [];
+    const base = scripted([{ json: chinese }], asked);
+    let requests = 0;
+    // The gateway answers 400 to any request that carries `output_config`, as one that does not know the field.
+    const picky: Outbound = async (url, init) => {
+      const body = String(init?.body ?? "");
+      if (url.endsWith("/v1/messages") && body.includes("output_config") && JSON.parse(body).system.startsWith("You analyse")) {
+        requests++;
+        return new Response("unknown field", { status: 400 });
+      }
+      if (url.endsWith("/v1/messages") && JSON.parse(body).system.startsWith("You analyse")) requests++;
+      return base(url, init);
+    };
+    const env = makeEnv({ ...LLM, OUTBOUND: picky });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    // First call: 400 with the field, then fine without it; the correction is sent without it at once. Never four.
+    expect(requests).toBe(3);
+    expect(asked.map((a) => a.effort)).toEqual([false, false]);
+    expect(await paid(env)).toMatchObject({ calls: 2 });
+    expect((await analysed(env)).unavailable).toBe(0);
+  });
+
+  it("a correction that does not answer is given up on at the end of the one budget, not after a fresh 25 seconds", async () => {
+    const asked: Asked[] = [];
+    const env = makeEnv({ ...LLM, ANALYSIS_BUDGET_MS: "700", OUTBOUND: scripted([{ json: chinese, usage: [100, 30] }, { hang: true }], asked) });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    const started = Date.now();
+    await runMinute(env);
+    const took = Date.now() - started;
+    expect(asked).toHaveLength(2);
+    expect(took).toBeLessThan(4000);
+    // The first answer stands (an honest result), and only the reply that came back was paid for.
+    expect((await analysed(env)).summary).toBe(chinese.summary);
+    expect(await paid(env)).toEqual({ i: 100, o: 30, calls: 1, items: 1 });
+  });
+
+  it("with too little of the budget left after the first answer, the correction is not asked for at all", async () => {
+    const asked: Asked[] = [];
+    const env = makeEnv({ ...LLM, ANALYSIS_BUDGET_MS: "600", OUTBOUND: scripted([{ json: chinese, delay: 450 }], asked) });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    expect(asked).toHaveLength(1);
+    expect((await analysed(env)).summary).toBe(chinese.summary);
+    expect(await paid(env)).toMatchObject({ calls: 1, items: 1 });
+  });
+
+  it("the budget is per item: the first answer's own limit still holds, and a model that never answers leaves the item for later", async () => {
+    const env = makeEnv({ ...LLM, ANALYSIS_BUDGET_MS: "300", OUTBOUND: scripted([{ hang: true }]) });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    const started = Date.now();
+    await runMinute(env);
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(await db(env, "SELECT COUNT(*) AS n FROM analyses")).toEqual([{ n: 0 }]);
+    expect(await paid(env)).toMatchObject({ calls: 0 });
   });
 });
