@@ -8,6 +8,7 @@ import { now } from "../clock";
 import { num, outbound, type Env } from "../env";
 import { truncate } from "../util";
 import { fetchPage, isPublicUrl, type Page } from "./fetchpage";
+import { THIN_CHARS } from "./pagerules";
 
 export type ProviderId = "direct" | "jina" | "firecrawl";
 export const PROVIDERS: ProviderId[] = ["direct", "jina", "firecrawl"];
@@ -41,8 +42,6 @@ const DEFAULTS: FetchSettings = {
   tests: {},
 };
 const PUBLIC_ENDPOINT: Record<Exclude<ProviderId, "direct">, string> = { jina: "https://r.jina.ai", firecrawl: "https://api.firecrawl.dev" };
-/** A page with less text than this is a shell (navigation words, a verification wall), not content. */
-export const THIN_CHARS = 60;
 const PROVIDER_TIMEOUT_MS = 20_000;
 
 export async function loadFetchSettings(env: Env): Promise<FetchSettings> {
@@ -80,7 +79,11 @@ export function validEndpoint(raw: string): boolean {
   }
 }
 
-const usable = (p: Page): boolean => p.text.replace(/\s+/g, "").length >= THIN_CHARS;
+/**
+ * Is this real content? The direct read says so itself (pagerules.ts: walls, page shells, short posts).
+ * What a reader service brings back is judged by its length alone.
+ */
+export const usable = (p: Page): boolean => (p.verdict ? p.verdict.quality === "ok" : p.text.replace(/\s+/g, "").length >= THIN_CHARS);
 
 async function timed<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const abort = new AbortController();
@@ -99,6 +102,7 @@ export async function runProvider(env: Env, id: ProviderId, s: FetchSettings, ur
   if (id === "direct") {
     const page = await fetchPage(env, url);
     if (!page) throw new Error("no answer that could be read");
+    if (page.verdict?.quality === "blocked") throw new Error(`the page refused the read (${page.verdict.reason})`.slice(0, 200));
     return page;
   }
   const conf = s[id];

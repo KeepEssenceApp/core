@@ -131,6 +131,28 @@ interface) and `firecrawl` (Firecrawl, or a self-hosted one) are off until turne
 one on sends the address of every link a user saves to that service. A page that is only a shell
 keeps its title and is marked "content could not be fetched", so its few words are never analysed.
 
+What `direct` does (rules in `src/services/pagerules.ts`; nothing is sent to anyone but the address
+the user saved):
+
+- It asks as a desktop browser, then as an iPhone; the apps that want a phone (Xiaohongshu, Douyin,
+  Bilibili, Weibo, Zhihu, Kuaishou and their short-link hosts, matched on the domain, not as a
+  substring of the address) get the iPhone first. The request carries `Accept-Language: zh-CN,zh;q=0.9,en;q=0.8`.
+  The first answer that is not a refusal or a verification wall ends it, so an ordinary page costs one
+  request; at most two User-Agents are tried, under the one 8-second deadline, and the address is checked
+  before each attempt and on every redirect (at most 3 per attempt).
+- A refusal (status 401, 403, 406, 429, 503) or a wall (a verification wall's words in the title,
+  the description, the first lines or, for a short page, the first markup) goes on to the next
+  User-Agent. When all of them were walls the page is "blocked": it has no title and no text, and
+  the item keeps the title it had. A test read from this page says so.
+- A page that is only a shell is "thin": less than 60 characters of text; a WeChat article without
+  its body (under 200 characters); or a column of buttons and menu lines. Its title is kept when it
+  names the page, and its words are not content. One exception to the 60 characters: on a site of
+  short posts (Xiaohongshu, Weibo, Douyin, Bilibili, X, Instagram ...) a description of 40 characters or
+  more is the post, and is what is stored as its text.
+- A title is not used when it is an address, a wall's, a login, error or verification page's, or only the
+  site's name. A title the client sent is always kept; a page title that is only a small piece (under
+  half, contained in it) of the title the item already has does not replace it.
+
 - `GET /admin/fetch` →
 
 ```json
