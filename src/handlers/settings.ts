@@ -167,7 +167,11 @@ function monthSvg(cal: CalendarMonth, x0: number, y0: number, cell: number, c: (
     const cx = x0 + (i % 7) * cell + cell / 2;
     const cy = y0 + Math.floor(i / 7) * cell + cell / 2;
     const r = cell * 0.26;
-    if (d.mark === "future") return;
+    if (d.mark === "future") {
+      // A day to come: a small neutral grey dot, fainter than "nothing saved", with no mark of any kind (A15). Every day of the month has its dot.
+      out += `<circle cx="${cx}" cy="${cy}" r="${(r * 0.25).toFixed(1)}" fill="${c.grey}" fill-opacity="0.45"/>`;
+      return;
+    }
     if (d.mark === "empty") out += `<circle cx="${cx}" cy="${cy}" r="${(r * 0.25).toFixed(1)}" fill="${c.grey}"/>`;
     else if (d.mark === "saved") out += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${c.grey}" stroke-width="1.5"/>`;
     else if (d.mark === "digest_unread") out += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${c.ink}" stroke-width="1.5"/>`;
