@@ -91,6 +91,8 @@
 
 **测试里先 GET 条目再查通知，通知是空的。** 打开一条解读过的条目就算「看过了」（`viewed_at`），通知里就不再提它。要核对通知的文字，先把 `viewed_at` 清掉，或者先查通知再打开条目。
 
+**B站给手机端的是 `m.bilibili.com/video/BV…?site=OVERSEAS&lang=…`，yt-dlp 在那个地址上什么也读不到。** runner 先用 iPhone 身份读页面（B站在「手机优先」名单里），浏览器就落在了手机站；用落地的地址去问时长，得到 `null`，视频被判成「没取到」（`unavailable`），而不是「太长」或开始读。现在凡是 `bilibili.com` 下 `/video/BV…`、`/video/av…` 的地址，都改成同一个视频在 `www.bilibili.com` 上的页面，只留分 P 的 `p`。是用真视频（一条 20 分钟的央视新闻）在 think 上才发现的；测试里的假页面是 `www` 的，看不出来。
+
 ## Workers 运行时
 
 **往 R2 流式写入必须知道长度**

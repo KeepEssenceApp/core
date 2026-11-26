@@ -48,7 +48,14 @@ export function videoByAddress(raw: string): VideoRef | null {
   // Douyin: the page wants a login.
   if (onDomain(host, ["douyin.com", "iesdouyin.com"])) return { kind: "unsupported" };
   // Bilibili: a video's page (the short link is followed by the browser first, and the page it ends on is asked again).
-  if (host === "b23.tv" || (onDomain(host, ["bilibili.com"]) && BILIBILI_VIDEO.test(path))) return { kind: "page", page: raw };
+  if (host === "b23.tv") return { kind: "page", page: raw };
+  const bilibili = onDomain(host, ["bilibili.com"]) ? BILIBILI_VIDEO.exec(path) : null;
+  if (bilibili) {
+    // Bilibili sends a phone to its mobile site with tracking in the address (`m.bilibili.com/video/BV…?site=OVERSEAS&lang=…`),
+    // and yt-dlp reads nothing there. It is asked for the video's own page: the same video id on www, and only the part number kept.
+    const part = url.searchParams.get("p") ?? "";
+    return { kind: "page", page: `${url.protocol}//www.bilibili.com${bilibili[0]}${/^\d{1,3}$/.test(part) ? `?p=${part}` : ""}` };
+  }
   // Weibo: its video pages. An ordinary post may or may not hold a video and its address does not say.
   if ((host === "video.weibo.com" && path.startsWith("/show")) || (onDomain(host, ["weibo.com", "weibo.cn"]) && path.startsWith("/tv/show/"))) return { kind: "page", page: raw };
   // Tencent Video.

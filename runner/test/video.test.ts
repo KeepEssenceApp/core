@@ -222,6 +222,19 @@ describe("the other platforms", () => {
     assert.equal(s.calls.probe.length, 0);
   });
 
+  it("a Bilibili link that the browser ends on the mobile site is asked about by the video's own page (a phone is sent there, with tracking in the address)", async () => {
+    const s = await run({
+      "http://b23.tv/mobile1": () => redirect("http://m.bilibili.com/video/BV1zz411c7mF?site=OVERSEAS&lang=zh-Hans&spm_id_from=333.1"),
+      "http://m.bilibili.com/video/BV1zz411c7mF?site=OVERSEAS&lang=zh-Hans&spm_id_from=333.1": () => videoPage("手机上的视频_哔哩哔哩_bilibili"),
+    });
+    const r = await s.read("http://b23.tv/mobile1");
+    assert.equal(r.status, 202);
+    assert.deepEqual(s.calls.probe, ["http://www.bilibili.com/video/BV1zz411c7mF"]);
+    // The job starts in the background: the download is asked for a moment later, for the same page.
+    assert.ok(await until(() => s.calls.download.length > 0), "the job did not start");
+    assert.deepEqual(s.calls.download.map((x) => (x as { page: string }).page), ["http://www.bilibili.com/video/BV1zz411c7mF"]);
+  });
+
   it("Bilibili, a Weibo video and Tencent Video are asked for their length through the media page; a short link is followed first", async () => {
     const s = await run({
       "http://www.bilibili.com/video/BV1xx411c7mD": () => videoPage("怎么泡茶_哔哩哔哩_bilibili"),
