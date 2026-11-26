@@ -215,6 +215,16 @@ export interface Fetched {
  * A runner that is reading the video of the post ends the search at once: the post is kept as it
  * is, and the words of the video are asked for later. Never throws.
  */
+// WeChat and Xiaohongshu links matter most, are the ones the direct read gets least of, and are the ones
+// with videos in them (#103). The direct read can find a caption long enough to be content and never ask the
+// runner, so the video would never be read: when a reader service is on, those links are asked of it first,
+// whatever order the operator chose. Every other link keeps the order.
+const READER_FIRST = new Set(["wechat", "xiaohongshu"]);
+function orderFor(s: FetchSettings, url: string): ProviderId[] {
+  if (!s.jina.enabled || !READER_FIRST.has(platformOf(url))) return s.order;
+  return ["jina", ...s.order.filter((p) => p !== "jina")];
+}
+
 export async function fetchContent(env: Env, url: string): Promise<Fetched> {
   let s: FetchSettings;
   try {
@@ -225,7 +235,7 @@ export async function fetchContent(env: Env, url: string): Promise<Fetched> {
   let shell: ReadPage | null = null;
   // A video that will not be read belongs to the link, whichever way reads its text in the end.
   let unread: VideoInfo | undefined;
-  for (const id of s.order) {
+  for (const id of orderFor(s, url)) {
     if (id !== "direct" && !s[id].enabled) continue;
     try {
       const page = await runProvider(env, id, s, url);
