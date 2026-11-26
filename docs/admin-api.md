@@ -184,9 +184,11 @@ The settings, keys included, are stored in D1 (`core_state`, key `fetch.settings
 ### Videos (#103)
 
 The words of a video are read by the runner, in the `jina` slot (the other ways never see a video:
-the direct read and Firecrawl cannot answer 202). So that a video post reaches the runner, put `jina`
-before `direct` in `order`: a page that the direct read gets in full is not asked of the runner
-again, and its video is not read.
+the direct read and Firecrawl cannot answer 202). For WeChat and Xiaohongshu links, when the `jina`
+slot is on, the core asks it first whatever `order` says (they are the links with videos, and the direct
+read gets least of them); for any other site that has videos (Bilibili, Weibo, Tencent Video) put `jina`
+before `direct` in `order`: a page the direct read gets in full is not asked of the runner again, and its
+video is not read.
 
 What the core asks of the reader service, at the address and with the key of the `jina` slot:
 

@@ -84,6 +84,38 @@ const row = async (env: Env, id: string) =>
 const statsOf = async (env: Env) => (await db(env, "SELECT platform, path, n FROM fetch_stats ORDER BY platform, path")) as { platform: string; path: string; n: number }[];
 const done = (text: string) => ({ state: "done", video_state: "recognized", recognized_text: text });
 
+describe("K23 the runner is asked first for the links that have videos", () => {
+  it("WeChat and Xiaohongshu links go to the runner first even when the direct read comes first and would read them; other links keep the order", async () => {
+    let env!: Env;
+    const runner = runnerStub(() => env);
+    const direct: string[] = [];
+    const outbound: Outbound = async (url, init) => {
+      if (url.startsWith(RUNNER + "/")) return runner.outbound(url, init);
+      direct.push(url);
+      return new Response(`<html><head><title>松木置物架</title></head><body><article><p>${LONG_CAPTION}</p></article></body></html>`, { headers: { "content-type": "text/html" } });
+    };
+    env = makeEnv({ OUTBOUND: outbound });
+    const set = await call(env, "PUT", "/admin/fetch", { token: ADMIN, body: { order: ["direct", "jina", "firecrawl"], jina: { enabled: true, endpoint: RUNNER, key: KEY } } });
+    expect(set.json.order).toEqual(["direct", "jina", "firecrawl"]);
+    const ann = await signIn(env);
+    runner.reading(ADDR, "job-first", LONG_CAPTION);
+    runner.job("job-first", { state: "reading" });
+    const id = await save(env, ann, ADDR);
+    expect(await detail(env, ann, id)).toMatchObject({ video_state: "reading", body: LONG_CAPTION });
+    expect(direct).toEqual([]);
+    // Another site: the direct read first, as the operator ordered; the runner is not asked.
+    const other = "https://blog.example.org/tea";
+    await save(env, ann, other);
+    expect(direct).toEqual([other]);
+    expect(runner.calls.some((c) => c.path.includes("blog.example.org"))).toBe(false);
+    // The runner off: the order is the operator's, and the direct read reads the Xiaohongshu link.
+    await call(env, "PUT", "/admin/fetch", { token: ADMIN, body: { jina: { enabled: false } } });
+    const plain = await save(env, ann, "https://www.xiaohongshu.com/explore/plain");
+    expect(direct).toContain("https://www.xiaohongshu.com/explore/plain");
+    expect((await detail(env, ann, plain)).video_state ?? null).toBeNull();
+  });
+});
+
 describe("K23 a video is saved at once, read in the background, and analysed when its words are there", () => {
   it("K23: saved → reading → neither triaged nor analysed → still reading → done → analysed exactly once", async () => {
     const { env, runner, modelCalls, ann } = await world();
