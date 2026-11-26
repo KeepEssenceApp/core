@@ -1,13 +1,13 @@
 // Items: saving helpers, the views the reading clients get, counts, and the page fetch result.
 import { CONTRACT } from "../generated/contract";
-import { DAY, now } from "../clock";
+import { DAY, MINUTE, now } from "../clock";
 import { LIMITS, num, type Env } from "../env";
 import type { Lang } from "../errors";
 import { localDay } from "../time";
 import type { AssistantRow, ItemRow, UserRow } from "../types";
 import { firstSentence, iso, looksLikeUrl, parseJson, shorten, truncate } from "../util";
 import { assetText, isTextType, type AssetRow } from "./assets";
-import { fetchContent } from "./fetchers";
+import { cancelJob, fetchContent } from "./fetchers";
 import { titleWins, usableTitle } from "./pagerules";
 import { siteOf } from "./fetchpage";
 
@@ -63,9 +63,17 @@ export interface ItemJoined extends ItemRow {
   q_item_id: string | null;
 }
 
+/**
+ * `fetch_state` while the content of an item is still to come: its page is being read (`pending`),
+ * or the words of its video are (`video_wait`). Such an item is neither triaged nor analysed yet.
+ */
+export const WAITING_STATES = "('pending', 'video_wait')";
+
+// No `recognized_text` here: lists, digests and notifications never carry it. The detail view and
+// the export add it themselves.
 export const ITEM_SELECT = `
   i.id, i.user_id, i.kind, i.url, i.title, i.site, i.opening, i.asset_id, i.source, i.content_unavailable,
-  i.fetch_state, i.pinned, i.expiry_days, i.expires_at, i.hard_expires_at, i.queue_holds, i.dispatch_to,
+  i.fetch_state, i.video_state, i.pinned, i.expiry_days, i.expires_at, i.hard_expires_at, i.queue_holds, i.dispatch_to,
   i.triaged_at, i.analysed_at, i.digest_day, i.signal, i.created_at,
   a.unavailable AS a_unavailable, a.summary AS a_summary, a.key_fact AS a_key_fact, a.points AS a_points,
   a.verdict AS a_verdict, a.related_hint AS a_related_hint, a.assistant_id AS a_assistant_id, a.created_at AS a_created_at,
@@ -147,6 +155,7 @@ export function itemView(row: ItemJoined, names: Names, lang: Lang, tz?: string)
     created_at: iso(row.created_at),
     stage: row.analysed_at ? "analysed" : row.triaged_at ? "triaged" : "saved",
     content_unavailable: row.content_unavailable === 1,
+    video_state: row.video_state ?? null,
     dispatch_to: row.dispatch_to ? { id: row.dispatch_to, name: names.get(row.dispatch_to) ?? "" } : null,
     days_left: daysLeft(row, now(), tz),
     pinned: row.pinned === 1,
@@ -181,6 +190,13 @@ function pageTitle(page: { title: string; site: string }, item: { url: string | 
 export async function fetchItemContent(env: Env, item: Pick<ItemRow, "id" | "user_id" | "url" | "title" | "title_from" | "body">): Promise<void> {
   const got = item.url ? await fetchContent(env, item.url) : null;
   const page = got?.page ?? null;
+  // A video that was not read (too long, not to be had) is part of how the item ended; one that is
+  // being read is not: the item waits for it (below).
+  const unread = got?.video && got.video.state !== "reading" ? got.video.state : null;
+  if (page && got?.video?.state === "reading") {
+    await waitForVideo(env, item, page, got.video.job);
+    return;
+  }
   if (page && got?.thin) {
     // Only a shell came back (navigation words, a verification wall). Its title is worth keeping;
     // its words are not content, and must not be analysed as if they were (QA #86).
@@ -188,20 +204,20 @@ export async function fetchItemContent(env: Env, item: Pick<ItemRow, "id" | "use
     const offered = keep ? "" : pageTitle(page, item);
     await env.DB.prepare(
       `UPDATE items SET fetch_state = 'failed', title = ?, title_from = ?, site = COALESCE(NULLIF(?, ''), site),
-         content_unavailable = CASE WHEN body IS NULL OR body = '' THEN 1 ELSE 0 END
+         content_unavailable = CASE WHEN body IS NULL OR body = '' THEN 1 ELSE 0 END, video_state = ?
        WHERE id = ? AND user_id = ? AND fetch_state = 'pending'`,
     )
-      .bind(keep ? item.title : offered || item.title, keep ? "client" : offered && offered !== item.title ? "fetch" : item.title_from, page.site, item.id, item.user_id)
+      .bind(keep ? item.title : offered || item.title, keep ? "client" : offered && offered !== item.title ? "fetch" : item.title_from, page.site, unread, item.id, item.user_id)
       .run();
     return;
   }
   if (!page) {
     // Text the client already sent is content; only a link with nothing at all is "unavailable".
     await env.DB.prepare(
-      `UPDATE items SET fetch_state = 'failed', content_unavailable = CASE WHEN body IS NULL OR body = '' THEN 1 ELSE 0 END
+      `UPDATE items SET fetch_state = 'failed', content_unavailable = CASE WHEN body IS NULL OR body = '' THEN 1 ELSE 0 END, video_state = ?
        WHERE id = ? AND user_id = ? AND fetch_state = 'pending'`,
     )
-      .bind(item.id, item.user_id)
+      .bind(unread, item.id, item.user_id)
       .run();
     return;
   }
@@ -210,11 +226,32 @@ export async function fetchItemContent(env: Env, item: Pick<ItemRow, "id" | "use
   const body = item.body ? item.body : page.text;
   await env.DB.prepare(
     `UPDATE items SET fetch_state = 'done', title = ?, title_from = ?, site = COALESCE(NULLIF(?, ''), site), body = ?, opening = ?,
-       content_unavailable = 0
+       content_unavailable = 0, video_state = ?
      WHERE id = ? AND user_id = ? AND fetch_state = 'pending'`,
   )
-    .bind(title, keepTitle ? "client" : "fetch", page.site, body, truncate(body, OPENING_CHARS), item.id, item.user_id)
+    .bind(title, keepTitle ? "client" : "fetch", page.site, body, truncate(body, OPENING_CHARS), unread, item.id, item.user_id)
     .run();
+}
+
+/**
+ * The runner is reading the video of the post (202). The item keeps the author's own words as its
+ * body and waits: `video_wait` is not `pending`, so the minute job does not read the page again, and
+ * no assistant takes the item until the words are there or `video_wait_minutes` have passed. It is
+ * not "content could not be fetched" while it waits, whatever the caption is.
+ */
+async function waitForVideo(env: Env, item: Pick<ItemRow, "id" | "user_id" | "url" | "title" | "title_from" | "body">, page: { title: string; site: string; text: string }, job: string): Promise<void> {
+  const keepTitle = item.title_from === "client" && item.title;
+  const title = keepTitle ? item.title : pageTitle(page, item) || firstSentence(page.text) || item.title;
+  const body = item.body ? item.body : page.text;
+  const res = await env.DB.prepare(
+    `UPDATE items SET fetch_state = 'video_wait', title = ?, title_from = ?, site = COALESCE(NULLIF(?, ''), site), body = ?, opening = ?,
+       content_unavailable = 0, video_state = 'reading', fetch_job = ?, fetch_deadline = ?
+     WHERE id = ? AND user_id = ? AND fetch_state = 'pending' AND archived_at IS NULL`,
+  )
+    .bind(title, keepTitle ? "client" : "fetch", page.site, body || null, truncate(body, OPENING_CHARS), job, now() + LIMITS.video_wait_minutes * MINUTE, item.id, item.user_id)
+    .run();
+  // The item is gone, archived, or another read of it got there first: nobody will ask about this job.
+  if ((res.meta.changes ?? 0) === 0) await cancelJob(env, job);
 }
 
 /** The longest text the core stores for one item (fetched pages and text files alike). */

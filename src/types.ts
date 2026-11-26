@@ -77,8 +77,15 @@ export interface ItemRow {
   asset_id: string | null;
   source: string;
   content_unavailable: number;
+  /** pending: the page is being read; video_wait: the words of its video are being read (#103); done, failed, none. */
   fetch_state: string;
   fetch_attempts: number;
+  /** The reader service's job while `fetch_state` is video_wait (and, for an archived item, until it is cancelled). */
+  fetch_job: string | null;
+  fetch_deadline: number | null;
+  video_state: "reading" | "recognized" | "no_speech" | "too_long" | "unavailable" | null;
+  recognized_text: string | null;
+  video_done_at: number | null;
   /** How often the built-in assistant failed to analyse it (QA #20). */
   analysis_attempts: number;
   pinned: number;

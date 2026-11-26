@@ -7,9 +7,11 @@ import { analyseForUser, digestForUser, dispatchForUser, modelConfigured } from 
 import { LIMITS, num, type Env } from "./env";
 import { purgeItemStatements } from "./handlers/items";
 import { cleanAssets, deleteIfUnreferenced, refStatement } from "./services/assets";
-import { fetchItemContent } from "./services/items";
+import { loadFetchSettings } from "./services/fetchers";
+import { fetchItemContent, WAITING_STATES } from "./services/items";
 import { leaveQueueStatements } from "./services/notes";
 import { sendDueNotifications } from "./services/notify";
+import { cancelArchivedJob, pollVideo, POLLS_PER_RUN, type WaitingItem } from "./services/video";
 import { applyTriageDefaults } from "./services/work";
 import type { ItemRow, UserRow } from "./types";
 
@@ -57,12 +59,44 @@ export async function fetchFallback(env: Env): Promise<void> {
   }
 }
 
-/** Items nobody triaged within 10 minutes get the defaults from the core. */
+/**
+ * Items whose video is being read (#103): ask the runner about the oldest few. Bounded: at most
+ * POLLS_PER_RUN items a run, asked together, each by one short request. An item archived or deleted
+ * meanwhile is not asked about, and its job is cancelled (below).
+ */
+export async function pollVideos(env: Env): Promise<void> {
+  const rows = await env.DB.prepare(
+    `SELECT id, user_id, url, body, fetch_job, fetch_deadline FROM items
+     WHERE fetch_state = 'video_wait' AND archived_at IS NULL AND user_id ${NOT_SUSPENDED} ORDER BY created_at LIMIT ?`,
+  )
+    .bind(POLLS_PER_RUN)
+    .all<WaitingItem>();
+  if (rows.results.length === 0) return;
+  const s = await loadFetchSettings(env);
+  await Promise.all(rows.results.map((item) => step("video", () => pollVideo(env, s, item))));
+}
+
+/** Items archived (expired, or deleted with the copy kept) while their video was being read: the runner is told to stop. */
+export async function cancelVideos(env: Env): Promise<void> {
+  const rows = await env.DB.prepare("SELECT id, user_id, fetch_job FROM items WHERE fetch_job IS NOT NULL AND archived_at IS NOT NULL LIMIT ?")
+    .bind(POLLS_PER_RUN)
+    .all<Pick<ItemRow, "id" | "user_id" | "fetch_job">>();
+  if (rows.results.length === 0) return;
+  const s = await loadFetchSettings(env);
+  await Promise.all(rows.results.map((item) => step("video-cancel", () => cancelArchivedJob(env, s, item))));
+}
+
+/**
+ * Items nobody triaged within 10 minutes get the defaults from the core. An item waiting for its
+ * video is not triaged, and its 10 minutes count from the moment it stopped waiting, so the sorting
+ * step still has its turn.
+ */
 export async function triageDefaults(env: Env): Promise<void> {
   const after = LIMITS.triage_default_after_minutes * MINUTE;
   const users = await env.DB.prepare(
     `SELECT u.* FROM users u WHERE u.suspended_at IS NULL AND u.id IN (
-       SELECT DISTINCT user_id FROM items WHERE triaged_at IS NULL AND archived_at IS NULL AND created_at <= ?
+       SELECT DISTINCT user_id FROM items WHERE triaged_at IS NULL AND archived_at IS NULL AND fetch_state <> 'video_wait'
+       AND COALESCE(video_done_at, created_at) <= ?
        AND user_id ${NOT_SUSPENDED} LIMIT 10)`,
   )
     .bind(now() - after)
@@ -74,7 +108,7 @@ async function runBuiltIns(env: Env, origin: string): Promise<void> {
   if (!modelConfigured(env)) return; // no model key: the built-in assistants simply do nothing
   const t = now();
   const triage = await env.DB.prepare(
-    `SELECT DISTINCT user_id FROM items WHERE triaged_at IS NULL AND archived_at IS NULL AND fetch_state <> 'pending'
+    `SELECT DISTINCT user_id FROM items WHERE triaged_at IS NULL AND archived_at IS NULL AND fetch_state NOT IN ${WAITING_STATES}
      AND (claim_id IS NULL OR claim_expires_at <= ?) AND user_id ${NOT_SUSPENDED} ORDER BY created_at LIMIT ?`,
   )
     .bind(t, num(env.TRIAGE_USERS_PER_RUN, 3))
@@ -83,7 +117,7 @@ async function runBuiltIns(env: Env, origin: string): Promise<void> {
 
   const analysis = await env.DB.prepare(
     `SELECT DISTINCT i.user_id FROM items i JOIN assistants a ON a.id = i.dispatch_to AND a.user_id = i.user_id
-     WHERE a.built_in = 'worker' AND i.triaged_at IS NOT NULL AND i.analysed_at IS NULL AND i.archived_at IS NULL AND i.fetch_state <> 'pending'
+     WHERE a.built_in = 'worker' AND i.triaged_at IS NOT NULL AND i.analysed_at IS NULL AND i.archived_at IS NULL AND i.fetch_state NOT IN ${WAITING_STATES}
      AND (i.claim_id IS NULL OR i.claim_expires_at <= ?) AND i.user_id ${NOT_SUSPENDED} ORDER BY i.created_at LIMIT ?`,
   )
     .bind(now(), num(env.ANALYSIS_USERS_PER_RUN, 2))
@@ -107,6 +141,8 @@ async function runBuiltIns(env: Env, origin: string): Promise<void> {
 export async function runMinute(env: Env): Promise<void> {
   const origin = env.PUBLIC_ORIGIN || env.APP_ORIGIN || "";
   await step("fetch", () => fetchFallback(env));
+  await step("video", () => pollVideos(env));
+  await step("video-cancel", () => cancelVideos(env));
   await step("triage-defaults", () => triageDefaults(env));
   await runBuiltIns(env, origin);
   await step("notify", () => sendDueNotifications(env));
