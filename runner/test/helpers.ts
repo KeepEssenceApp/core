@@ -8,9 +8,12 @@ import http2 from "node:http2";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, type Config } from "../src/config.ts";
+import { createJobs, type Jobs, type JobsOptions } from "../src/jobs.ts";
+import type { MediaRef, Pipeline } from "../src/media.ts";
 import { FilteringProxy, type Resolved } from "../src/proxy.ts";
 import { Renderer } from "../src/render.ts";
 import { createRunner } from "../src/server.ts";
@@ -65,6 +68,37 @@ export async function canary(): Promise<{ port: number; hits: () => number; clos
   return { port: (server.address() as AddressInfo).port, hits: () => n, close: () => void server.close() };
 }
 
+export const SAID = "大家好，今天我们来讲讲怎么泡一壶好茶，水温八十度，泡两分钟。";
+
+/** The media steps, made up: no network, no yt-dlp, no ffmpeg. `calls` says what they were asked. */
+export function fakes(over: Partial<Pipeline> = {}): { pipeline: Pipeline; calls: { probe: string[]; download: MediaRef[]; extract: number; transcribe: number } } {
+  const calls = { probe: [] as string[], download: [] as MediaRef[], extract: 0, transcribe: 0 };
+  const pipeline: Pipeline = {
+    probe: async (page) => {
+      calls.probe.push(page);
+      return 120;
+    },
+    download: async (ref, dir) => {
+      calls.download.push(ref);
+      const file = join(dir, "media.mp4");
+      await writeFile(file, "video");
+      return file;
+    },
+    extractAudio: async (_file, dir) => {
+      calls.extract++;
+      const file = join(dir, "audio.ogg");
+      await writeFile(file, "audio");
+      return file;
+    },
+    transcribe: async () => {
+      calls.transcribe++;
+      return { kind: "text", text: SAID };
+    },
+    ...over,
+  };
+  return { pipeline, calls };
+}
+
 export interface Started {
   base: string;
   hits: Hit[];
@@ -73,6 +107,12 @@ export interface Started {
   server: http.Server;
   proxy: FilteringProxy;
   renderer: Renderer;
+  /** The video jobs (their media steps are `fakes`, unless the test gave others) and what those steps were asked. */
+  jobs: Jobs;
+  jobsRoot: string;
+  calls: ReturnType<typeof fakes>["calls"];
+  /** A request with the key (or none, or another): `method` and the path after the slash, as the core sends them. */
+  call: (method: string, path: string, key?: string | null) => Promise<{ status: number; json: any }>;
   /** Connections to the made-up network that are still open. */
   open: () => number;
   read: (url: string, key?: string | null) => Promise<{ status: number; json: any }>;
@@ -85,6 +125,8 @@ export interface Options {
   privateNames?: string[];
   /** Serve https:// too, with a certificate made for the test (needs openssl). */
   tls?: boolean;
+  /** Settings of the video jobs, and the media steps to use in place of the made-up ones. */
+  jobs?: Partial<JobsOptions>;
 }
 
 export const hasOpenssl = (() => {
@@ -155,9 +197,26 @@ export async function start(routes: Routes, opts: Options = {}): Promise<Started
   const proxy = new FilteringProxy({ lookup, connect: (_ip, port) => net.connect({ host: "127.0.0.1", port: port === 443 ? tlsPort : plainPort }) });
   await proxy.listen();
   const renderer = new Renderer(cfg, proxy);
-  const server = createRunner(cfg, renderer, (l) => logs.push(l));
+  const jobsRoot = mkdtempSync(join(tmpdir(), "runner-jobs-"));
+  const fk = fakes();
+  const jobs = createJobs({
+    ...fk.pipeline,
+    enabled: true,
+    maxSeconds: cfg.videoMaxMinutes * 60,
+    concurrency: cfg.videoConcurrency,
+    queue: cfg.videoQueue,
+    root: join(jobsRoot, "jobs"),
+    log: (l) => logs.push(l),
+    ...opts.jobs,
+  });
+  await jobs.ready;
+  const server = createRunner(cfg, renderer, (l) => logs.push(l), jobs);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const call = async (method: string, path: string, key: string | null = KEY) => {
+    const res = await fetch(`${base}/${path}`, { method, headers: { accept: "application/json", ...(key === null ? {} : { authorization: `Bearer ${key}` }) } });
+    return { status: res.status, json: await res.json().catch(() => null) };
+  };
   return {
     base,
     hits,
@@ -166,14 +225,17 @@ export async function start(routes: Routes, opts: Options = {}): Promise<Started
     server,
     proxy,
     renderer,
+    jobs,
+    jobsRoot: join(jobsRoot, "jobs"),
+    calls: fk.calls,
+    call,
     open: () => sockets.size,
-    async read(url, key = KEY) {
-      const res = await fetch(`${base}/${url}`, { headers: { accept: "application/json", ...(key === null ? {} : { authorization: `Bearer ${key}` }) } });
-      return { status: res.status, json: await res.json().catch(() => null) };
-    },
+    read: (url, key = KEY) => call("GET", url, key),
     async close() {
       server.close();
       server.closeAllConnections();
+      await jobs.close();
+      rmSync(jobsRoot, { recursive: true, force: true });
       await renderer.close();
       await proxy.close();
       for (const s of sockets) s.destroy();
