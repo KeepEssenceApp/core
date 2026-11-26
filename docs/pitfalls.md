@@ -46,9 +46,15 @@
 
 ## 抓取 runner（`runner/`）
 
-**Playwright 的 `route.fulfill` 回一个 302，浏览器不会再经过 `route` 去取新地址。** 浏览器自己跟了跳转，请求直接出网（我们把 Chromium 指到一个不存在的代理，所以得到的是 `ERR_PROXY_CONNECTION_FAILED`，而不是悄悄连出去）。所以跳转在 `net.ts` 里一跳一跳跟（`followRedirects`），每一跳先查是不是公开地址；页面本身先取好，再把浏览器送到跳转的终点，并把已取到的应答交给它。页面里脚本、样式的跳转同样在这里跟。
+**浏览器自己走网络，只经过 `runner/src/proxy.ts`。** 一开始让 Node 替浏览器发所有请求（`route.fulfill`），结果 Cloudflare 对 `example.com` 回 403：Node 的 HTTP/1.1 和 TLS 指纹不是 Chrome 的，`curl` 同一台机器却是 200。现在 Chromium 用自己的网络栈（指纹是 Chrome 的），代理只管「能连到哪」：主机是公开的、端口是 80/443、名字解析出的**每个**地址都是公开的，再连到查过的那个地址。`route` 只留下拦图片/音视频/字体和网址检查。
 
-**IP 字面量不会触发 `lookup`。** Node 的 `http.request({ lookup })` 只在要解析名字时才调 `lookup`，地址里直接写 IP 就绕过了。`net.ts` 对 IP 字面量自己查一遍；对名字，`guardedLookup` 在连接那一刻检查解析出的每个地址（`all: true`，Happy Eyeballs 也走它）。只靠发请求前查网址，挡不住「名字指向内网」和 DNS 重绑定。
+**`http.request({ createConnection })` 不够：没有自己的 agent 时它还是自己解析名字。** 代理转发 `http://` 地址时一开始这么写，测试里一个不在任何 DNS 里的名字报 `ENOTFOUND`，才发现 Node 绕过了我们查过的地址（放到线上就是 SSRF）。要用一个覆盖 `createConnection` 的 `http.Agent` 子类（`PinnedAgent`），`proxy.test.ts` 里有回归测试。
+
+**Chromium 对回环地址默认不走代理。** 要给每个 context 的代理写 `bypass: "<-loopback>"`，并且启动时 `proxy: { server: "per-context" }`；否则页面请求 `localhost` 会直接连到本机。测试里用一个只计数的 canary 服务验证（含 WebSocket）。
+
+**代理把 `http://` 地址拒掉时，浏览器当成站点自己的 403。** 所以拒绝的应答带 `x-runner-refused` 头，`render.ts` 看到就当错误，不当成「站点拒绝，换 UA 再试」。
+
+**无头 Chromium 的 `--accept-lang=` 照写进 `navigator.languages`。** 写成 `zh-CN,zh;q=0.9` 会让它变成三项乱码；只写 `zh-CN,zh,en`，请求头由 Chrome 自己写（完整 Chromium 是 `zh-CN,zh;q=0.9`，headless shell 不带权重）。
 
 **Node 直接跑 `.ts` 不认构造函数的参数属性（`constructor(private x)`）。** 只擦类型，不转换语法。`runner/tsconfig.json` 开了 `erasableSyntaxOnly`，写错时 `typecheck` 就报。导入要带 `.ts` 后缀；`src/services/pagerules.ts` 和 `publicurl.ts` 因此不能有别的导入。
 

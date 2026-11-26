@@ -7,9 +7,9 @@ public Jina service is then not used. It is the last way in the reading chain (d
 QA #101, D45/D46). **This is a first version that works, not a finished one** (see the end).
 
 ```
-core (Cloudflare Worker) ──https, Bearer key──▶ Cloudflare Tunnel ──▶ runner (127.0.0.1) ──▶ Chromium
-                                                                              │
-                                                  every request of the page ──┴──▶ net.ts ──▶ public addresses only
+core (Cloudflare Worker) ──https, Bearer key──▶ Cloudflare Tunnel ──▶ runner (127.0.0.1)
+                                                                          │
+                                  Chromium ──all its traffic──▶ proxy.ts ─┴─▶ public addresses only
 ```
 
 ## The interface
@@ -41,18 +41,21 @@ did not read it" and goes on; nothing here can stop a save, an analysis or a dai
 
 ## What it will not do
 
-- **Reach the machine's network.** The browser makes no request of its own: Playwright hands each one to
-  `net.ts`, which asks only public http(s) addresses and checks the address a name resolves to **at the moment
-  of connecting** (so a name pointing into the LAN or tailnet, or one that changes its answer, is refused).
-  Redirects are followed there, hop by hop, each place checked first. Chromium is also pointed at a proxy that
-  does not exist, so a request that escapes the interception (a WebSocket) fails instead of connecting.
+- **Reach the machine's network.** Chromium does its own networking (so its TLS handshake, HTTP/2 and
+  headers are Chrome's own, which is what sites that turn automation away look at), but only through
+  `proxy.ts`, a proxy on the loopback with a password for each read. For every connection the proxy asks:
+  is the host a public one, is the port 80 or 443, and is **every address the name resolves to** public? It
+  then connects to the address it checked (not to the name again), so a name that points into the LAN or the
+  tailnet, or that changes its answer between two lookups, is refused. The loopback is not exempt: a page that
+  asks for `localhost` is sent to the proxy too, and refused there. Redirects, scripts, frames, XHR and
+  WebSockets all go the same way; the browser's own WebRTC is limited to the proxy as well.
 - **Load pictures, sound or fonts**, or keep cookies. One visit in a fresh context, closed at the end or at
   once when the deadline passes. What a page's own scripts and styles ask of its own hosts still goes out (that
   is how a page is drawn); nothing is sent to a reader or search service.
 - **Log what was read.** A line says when, how it went (`ok`, `wall`, `thin`, `error`, `timeout`, `busy`),
   which of `wechat` / `xiaohongshu` / `other`, and how long. Never an address, a name, a word of the page or the key.
 - **Run forever.** One deadline for all the attempts (17 s: the core gives a reader service 20), at most
-  `RUNNER_CONCURRENCY` pages at once, a queue of `RUNNER_QUEUE`, and a cap on the bytes a page may add up to.
+  `RUNNER_CONCURRENCY` pages at once, a queue of `RUNNER_QUEUE`, and a cap on the bytes a read may add up to, counted at the proxy (a read that passes it has every connection cut).
 
 ## Run it
 
@@ -69,7 +72,7 @@ npx playwright-core install chromium      # on Linux: add --with-deps (needs sud
 | `RUNNER_HOST` / `RUNNER_PORT` | `127.0.0.1` / `8820` | listen on the loopback only; the tunnel connects here |
 | `RUNNER_DEADLINE_MS` | `17000` | all attempts for one address together |
 | `RUNNER_CONCURRENCY` / `RUNNER_QUEUE` | `2` / `4` | pages at once / waiting |
-| `RUNNER_MAX_BYTES` / `RUNNER_MAX_CHARS` | 4 MiB / 100000 | what one page may add up to / the longest text returned |
+| `RUNNER_MAX_BYTES` / `RUNNER_MAX_CHARS` | 8 MiB / 100000 | what one read may add up to, both ways / the longest text returned |
 | `RUNNER_NO_SANDBOX` | — | `1` only where Chromium's sandbox cannot start (a container) |
 | `RUNNER_CHROMIUM_PATH` / `RUNNER_CHROMIUM_ARGS` | — | another Chromium / extra flags |
 
@@ -114,9 +117,13 @@ npm run typecheck
 npm test            # a real headless Chromium against a made-up network: no real address is asked for
 ```
 
-The tests cover the interface and the key, the rules (walls, shells, short posts, titles, User-Agent order),
-that nothing private is ever asked for (redirects, scripts, frames, WebSockets), the deadline, the queue, the
-restart of a dead Chromium, and what is logged.
+`test/proxy.test.ts` speaks to the proxy with raw sockets: who may use it, where it will connect (private
+addresses in every spelling, other ports, a name with one private answer, a name that changes its answer),
+what it counts, and that closing a read closes its connections. `test/runner.test.ts` runs the whole runner:
+the interface and the key, the rules (walls, shells, short posts, titles, User-Agent order), https through a
+tunnel with the browser's own HTTP/2, that a page asking for localhost, the LAN or a WebSocket on this machine
+reaches nothing (a canary server counts), the deadline, the queue, the byte cap, the restart of a dead
+Chromium, and what is logged. The only two seams are the proxy's name lookup and its final connection.
 
 ## A first version
 
@@ -124,4 +131,5 @@ Not done: a plain request before the browser (a page that needs no scripts costs
 a pool of warm contexts; Xiaohongshu short links (`xhslink.com`) are followed like any redirect, nothing more;
 a Channels page (`weixin.qq.com/sph/`) cannot be read; and nothing here claims that a given WeChat or
 Xiaohongshu page can be read: that is shown by a test read on a real, authorised address, and a verification
-wall is not a success.
+wall is not a success. Cloudflare shows its own page for a 502 or 504 the runner answers, so the core sees the
+status but not the message; the log on the runner holds the result.

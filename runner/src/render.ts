@@ -1,12 +1,12 @@
-// The browser. It renders; it does not go to the network. Every request it makes is answered here,
-// from net.ts (public addresses only, checked at connect time), so the page's own scripts cannot
-// reach this machine's network, and Chromium is pointed at a proxy that does not exist so anything
-// that slips past the interception (a WebSocket, say) fails instead of connecting.
-import { chromium, type Browser, type BrowserContext, type Route } from "playwright-core";
-import { ACCEPT_LANGUAGE, UA_IPHONE } from "../../src/services/pagerules.ts";
+// The browser. It does its own networking (so it looks like Chrome to the sites that look), but only
+// through proxy.ts, which decides where a connection may go. Here: one fresh context for each visit with
+// credentials of its own, pictures / sound / fonts never asked for, and everything closed when the visit
+// ends or the time is up.
+import { chromium, type Browser, type BrowserContext } from "playwright-core";
+import { UA_IPHONE } from "../../src/services/pagerules.ts";
 import { isPublicUrl } from "../../src/services/publicurl.ts";
 import type { Config } from "./config.ts";
-import { followRedirects, request, type Net, type NetResponse } from "./net.ts";
+import { REFUSED, type FilteringProxy } from "./proxy.ts";
 
 export interface Rendered {
   status: number;
@@ -23,10 +23,10 @@ export class Renderer {
   #browser: Browser | null = null;
   #launching: Promise<Browser> | null = null;
   private cfg: Config;
-  private net: Net;
-  constructor(cfg: Config, net: Net = request) {
+  private proxy: FilteringProxy;
+  constructor(cfg: Config, proxy: FilteringProxy) {
     this.cfg = cfg;
-    this.net = net;
+    this.proxy = proxy;
   }
 
   async #get(): Promise<Browser> {
@@ -35,7 +35,21 @@ export class Renderer {
       .launch({
         headless: true,
         executablePath: this.cfg.chromiumPath,
-        args: ["--proxy-server=http://127.0.0.1:1", "--proxy-bypass-list=<-loopback>", "--disable-background-networking", "--disable-sync", "--no-first-run", ...this.cfg.chromiumArgs],
+        // Each context names its own proxy (with its own credentials); the loopback is not exempt, so a page
+        // that asks for localhost is sent to the proxy too, and refused there.
+        proxy: { server: "per-context" },
+        args: [
+          "--proxy-bypass-list=<-loopback>",
+          // Chromium's own Accept-Language, the list of the direct read: zh-CN,zh;q=0.9,en;q=0.8
+          "--lang=zh-CN",
+          "--accept-lang=zh-CN,zh,en",
+          "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+          "--force-webrtc-ip-handling-policy",
+          "--disable-background-networking",
+          "--disable-sync",
+          "--no-first-run",
+          ...this.cfg.chromiumArgs,
+        ],
       })
       .then((b) => {
         this.#browser = b;
@@ -53,38 +67,38 @@ export class Renderer {
   /** One visit in a fresh context: closed when it ends, or at once when `signal` aborts (a read that ran out of time leaves nothing running). */
   async render(url: string, ua: string, signal: AbortSignal): Promise<Rendered> {
     const browser = await this.#get();
+    const read = this.proxy.open(this.cfg.maxBytes);
     const phone = ua === UA_IPHONE;
-    const context: BrowserContext = await browser.newContext({
-      userAgent: ua,
-      viewport: phone ? { width: 390, height: 844 } : { width: 1280, height: 800 },
-      isMobile: phone,
-      hasTouch: phone,
-      locale: "zh-CN",
-      serviceWorkers: "block",
-      acceptDownloads: false,
-    });
-    const stop = () => void context.close().catch(() => {});
+    let context: BrowserContext | null = null;
+    const stop = () => {
+      read.close();
+      void context?.close().catch(() => {});
+    };
     if (signal.aborted) stop();
     else signal.addEventListener("abort", stop, { once: true });
-    const budget = { left: this.cfg.maxBytes };
     try {
-      // The page itself first, with its redirects followed here (each place checked before it is asked): the
-      // browser is then sent to where they ended, and is handed the answer already fetched.
-      const first = await followRedirects(this.net, {
-        url,
-        headers: { "user-agent": ua, accept: "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.5", "accept-language": ACCEPT_LANGUAGE },
-        signal,
-        maxBytes: budget.left,
+      context = await browser.newContext({
+        userAgent: ua,
+        viewport: phone ? { width: 390, height: 844 } : { width: 1280, height: 800 },
+        isMobile: phone,
+        hasTouch: phone,
+        serviceWorkers: "block",
+        acceptDownloads: false,
+        proxy: { server: `http://127.0.0.1:${this.proxy.port}`, username: read.username, password: read.password, bypass: "<-loopback>" },
       });
-      budget.left -= first.body.length;
-      const type = (first.headers["content-type"] ?? "").toLowerCase();
-      if (type && !/html|xml|text\/plain/.test(type)) throw new Error("not a page");
-      const landed = new URL(first.url);
-      landed.hash = "";
-      const fetched = new Map<string, NetResponse>([[landed.toString(), first]]);
-      await context.route("**/*", (route) => this.#answer(route, signal, budget, fetched));
+      // Pictures, sound and fonts add nothing to the words, and each is a request to somebody's server. An address
+      // that is not public is refused here as well as at the proxy.
+      await context.route("**/*", (route) => {
+        const req = route.request();
+        const type = req.resourceType();
+        if (type === "image" || type === "media" || type === "font" || !isPublicUrl(req.url())) return route.abort("blockedbyclient").catch(() => {});
+        return route.continue().catch(() => {});
+      });
       const page = await context.newPage();
-      const response = await page.goto(first.url, { waitUntil: "domcontentloaded", timeout: this.cfg.deadlineMs });
+      const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.cfg.deadlineMs });
+      if (response?.headers()[REFUSED]) throw new Error("the proxy refused that address");
+      const type = (response?.headers()["content-type"] ?? "").toLowerCase();
+      if (type && !/html|xml|text\/plain/.test(type)) throw new Error("not a page");
       // Give scripts a moment to draw the page, but not for ever.
       await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => {});
       const data = await page.evaluate(() => {
@@ -113,30 +127,8 @@ export class Renderer {
       return { status: response?.status() ?? 0, finalUrl: page.url(), ...data };
     } finally {
       signal.removeEventListener("abort", stop);
-      await context.close().catch(() => {});
-    }
-  }
-
-  async #answer(route: Route, signal: AbortSignal, budget: { left: number }, fetched: Map<string, NetResponse>): Promise<void> {
-    const req = route.request();
-    const type = req.resourceType();
-    const ready = fetched.get(req.url());
-    if (ready && req.isNavigationRequest()) {
-      fetched.delete(req.url());
-      await route.fulfill({ status: ready.status, headers: ready.headers, body: ready.body });
-      return;
-    }
-    // Pictures, sound and fonts add nothing to the words, and each is a request to somebody's server.
-    if (type === "image" || type === "media" || type === "font" || !isPublicUrl(req.url()) || budget.left <= 0) {
-      await route.abort("blockedbyclient").catch(() => {});
-      return;
-    }
-    try {
-      const res = await followRedirects(this.net, { url: req.url(), method: req.method(), headers: req.headers(), body: req.postDataBuffer(), signal, maxBytes: budget.left });
-      budget.left -= res.body.length;
-      await route.fulfill({ status: res.status, headers: res.headers, body: res.body });
-    } catch {
-      await route.abort("failed").catch(() => {});
+      read.close();
+      await context?.close().catch(() => {});
     }
   }
 
