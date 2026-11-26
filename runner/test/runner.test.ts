@@ -118,6 +118,29 @@ describe("the rules are the core's (#100)", () => {
     assert.equal((await s.read("http://blog.example.org/explore/2")).status, 422);
   });
 
+  it("a Xiaohongshu note is read from the page's own data: the note, not its comments or the feed of other notes", async () => {
+    const feed = Array.from({ length: 40 }, (_, i) => `<p>热门推荐里别人的第${i}条笔记标题，和这一条没有关系</p>`).join("");
+    const note = (state: object) => page("阳台上的薄荷 - rednote", `<div id="app"><p>阳台上的薄荷</p><p>某某的阳台</p><p>关注</p><p>79条精选评论</p><p>打开小红书查看全部精彩评论</p>${feed}</div><script>window.__INITIAL_STATE__ = ${JSON.stringify(state)};</script>`);
+    const long = { noteData: { data: { noteData: { title: "阳台上的薄荷", desc: "周末把阳台收拾了一遍，种了薄荷和罗勒，晚上泡了一杯薄荷茶。 #阳台 #薄荷", user: { nickName: "某某的阳台" } } } } };
+    const short = { noteData: { data: { noteData: { title: "薄荷", desc: "#阳台", user: { nickName: "某某" } } } } };
+    const s = await run({
+      "http://www.xiaohongshu.com/explore/long": () => note(long),
+      "http://www.xiaohongshu.com/explore/short": () => note(short),
+      "http://blog.example.org/explore/long": () => note(long),
+    });
+    const ok = await s.read("http://www.xiaohongshu.com/explore/long");
+    assert.equal(ok.status, 200);
+    assert.equal(ok.json.data.content, "阳台上的薄荷\n某某的阳台\n周末把阳台收拾了一遍，种了薄荷和罗勒，晚上泡了一杯薄荷茶。 #阳台 #薄荷");
+    assert.equal(ok.json.data.title, "阳台上的薄荷");
+    for (const noise of ["热门推荐", "精选评论", "打开小红书"]) assert.ok(!ok.json.data.content.includes(noise), noise);
+    // A note too short to be content is not made into content by the feed around it.
+    const thin = await s.read("http://www.xiaohongshu.com/explore/short");
+    assert.equal(`${thin.status} ${thin.json.error}`, "422 thin");
+    // Other sites' pages are read as pages, whatever a script of theirs says about notes.
+    const other = await s.read("http://blog.example.org/explore/long");
+    assert.ok(other.status === 200 && other.json.data.content.includes("热门推荐"));
+  });
+
   it("a title that is a login page's is not given", async () => {
     const s = await run({ "http://blog.example.org/a": () => article("登录 - 知乎") });
     const r = await s.read("http://blog.example.org/a");

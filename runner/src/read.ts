@@ -46,13 +46,17 @@ export async function readUrl(renderer: Pick<Renderer, "render">, cfg: Config, u
         failure = { ok: false, kind: "wall", message: `a verification wall answered (${wall})` };
         continue;
       }
-      const verdict = assessPage({ url: got.finalUrl, text: got.text, description: got.description });
+      // A site whose own data says what the post is: the post is all that is judged and all that is returned.
+      // (A page's comments and a feed of other posts are not the post, and a short post is not made longer by them.)
+      const post = got.post;
+      const verdict = assessPage({ url: got.finalUrl, text: post ? post.text : got.text, description: post ? post.text : got.description });
       if (verdict.quality !== "ok") {
         failure = { ok: false, kind: "thin", message: verdict.reason };
         continue;
       }
-      const content = chars(verdict.caption ? got.description : got.text, cfg.maxChars);
-      return { ok: true, title: usableTitle(got.title, { url: got.finalUrl, site: got.site }) ? got.title : "", content };
+      const body = post ? post.text : verdict.caption ? got.description : got.text;
+      const title = post?.title || got.title;
+      return { ok: true, title: usableTitle(title, { url: got.finalUrl, site: got.site }) ? title : "", content: chars(body, cfg.maxChars) };
     }
     return failure;
   } finally {

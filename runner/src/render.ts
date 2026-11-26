@@ -2,13 +2,21 @@
 // through proxy.ts, which decides where a connection may go. Here: one fresh context for each visit with
 // credentials of its own, pictures / sound / fonts never asked for, and everything closed when the visit
 // ends or the time is up.
-import { chromium, type Browser, type BrowserContext } from "playwright-core";
-import { UA_IPHONE } from "../../src/services/pagerules.ts";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
+import { hostOf, onDomain, UA_IPHONE } from "../../src/services/pagerules.ts";
 import { isPublicUrl } from "../../src/services/publicurl.ts";
 import type { Config } from "./config.ts";
 import { REFUSED, type FilteringProxy } from "./proxy.ts";
 
+/** What a site's own page data says the post is: the post and nothing around it (no comments, no feed of other posts). */
+export interface Post {
+  title: string;
+  text: string;
+}
+
 export interface Rendered {
+  /** Set for the sites that have an extractor (Xiaohongshu notes), when the page carries the post. */
+  post?: Post;
   status: number;
   finalUrl: string;
   title: string;
@@ -124,7 +132,8 @@ export class Renderer {
           head: document.documentElement.outerHTML.slice(0, 60000),
         };
       });
-      return { status: response?.status() ?? 0, finalUrl: page.url(), ...data };
+      const finalUrl = page.url();
+      return { status: response?.status() ?? 0, finalUrl, ...data, post: (await postOf(page, finalUrl)) ?? undefined };
     } finally {
       signal.removeEventListener("abort", stop);
       read.close();
@@ -137,4 +146,23 @@ export class Renderer {
     this.#browser = null;
     await b?.close().catch(() => {});
   }
+}
+
+/**
+ * A Xiaohongshu note page is the note, its comments, the author's other notes and a feed of unrelated ones, all as
+ * text. The page's own data holds the note itself (title, caption, author); that is what is read.
+ */
+async function postOf(page: Page, url: string): Promise<Post | null> {
+  if (!onDomain(hostOf(url), ["xiaohongshu.com", "rednote.com"])) return null;
+  return page
+    .evaluate(() => {
+      const state = (window as unknown as { __INITIAL_STATE__?: { noteData?: { data?: { noteData?: Record<string, any> } } } }).__INITIAL_STATE__;
+      const note = state?.noteData?.data?.noteData;
+      if (!note || typeof note !== "object") return null;
+      const clean = (v: unknown) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "");
+      const title = clean(note.title);
+      const text = [title, clean(note.user?.nickName ?? note.user?.nickname), clean(note.desc)].filter(Boolean).join("\n");
+      return text ? { title, text } : null;
+    })
+    .catch(() => null);
 }
