@@ -58,6 +58,14 @@
 
 **Node 直接跑 `.ts` 不认构造函数的参数属性（`constructor(private x)`）。** 只擦类型，不转换语法。`runner/tsconfig.json` 开了 `erasableSyntaxOnly`，写错时 `typecheck` 就报。导入要带 `.ts` 后缀；`src/services/pagerules.ts` 和 `publicurl.ts` 因此不能有别的导入。
 
+**不能靠 yt-dlp 叫起来的 ffmpeg 自己守规矩。** 某些 HLS/DASH 流 yt-dlp 可以交给 ffmpeg 去下，那条连接走不走 `--proxy` 要看 yt-dlp 的版本，这里没有去验证，也不依赖它。所以下载参数里写 `--downloader "dash,m3u8:native"`（用它自己的下载器，走 `--proxy`），子进程环境里也写上代理；`ffmpeg` 抽音频时只开 `-protocol_whitelist file`，下载回来的文件就算是一份指向别处的播放列表也打不开任何地址。`runner/test/media.test.ts` 有参数列表的测试，和一条用真 yt-dlp + ffmpeg 穿过真代理的冒烟测试（没装就跳过）。
+
+**yt-dlp 和 ffmpeg 的参数里有代理密码。** 每次读取的代理账号和密码在参数列表里（`ps` 看得到，和环境一样只在本机、读完即失效）。所以 `exec.ts` 的报错只有固定的几个词，不带参数也不带程序的输出；日志里没有地址、任务号、正文。收到「取消」要杀整个进程组（`detached` + `kill(-pid)`），yt-dlp 起的 ffmpeg 才会一起停。
+
+**视频任务的 20 分钟期限从开始跑算，不从排队算。** 排 4 个、一个约十几分钟，排队就要近一小时（core 等 60 分钟）；期限算排队的话后面的任务会在开始前就过期。
+
+**小红书视频笔记的字段是照单子里写的路径取的，没拿真页面验过。** `noteData.type === "video"`、`video.capa.duration` 或 `video.media.video.duration`（按秒）、`video.media.stream.h264[].masterUrl`。测试里的页面是照这些路径做的；真站点改了字段，视频笔记会变成「没取到媒体地址」（`unavailable`），作者自己的话照旧返回。腾讯视频不在 core 的「短帖站点」名单里（`pagerules.ts` 的 `SHORT_FORM`），它页面的描述不当作者的话，作者的话为空。
+
 **`vitest` 不会去跑 `runner/test`。** core 的 `vitest.config.ts` 只收 `test/**/*.test.ts`；runner 的测试用 `node:test`，在 `runner/` 里 `npm test`，CI 里是单独一项。
 
 ## 转写 worker（`transcriber/`）

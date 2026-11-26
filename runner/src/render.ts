@@ -6,17 +6,24 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { hostOf, onDomain, UA_IPHONE } from "../../src/services/pagerules.ts";
 import { isPublicUrl } from "../../src/services/publicurl.ts";
 import type { Config } from "./config.ts";
+import type { NoteVideo } from "./detect.ts";
 import { REFUSED, type FilteringProxy } from "./proxy.ts";
 
 /** What a site's own page data says the post is: the post and nothing around it (no comments, no feed of other posts). */
 export interface Post {
   title: string;
   text: string;
+  /** Only the author's name came back: there is no word of the author's own in `text`. */
+  bare: boolean;
+  /** Set when the note is a video note: its length and media addresses, as the page's own data has them. */
+  video?: NoteVideo;
 }
 
 export interface Rendered {
   /** Set for the sites that have an extractor (Xiaohongshu notes), when the page carries the post. */
   post?: Post;
+  /** The addresses of the page's iframes (`src` and the lazy `data-src`): a WeChat article's embedded video is one. */
+  frames: string[];
   status: number;
   finalUrl: string;
   title: string;
@@ -130,6 +137,10 @@ export class Renderer {
           text: lines.join("\n"),
           noscript: clean([...document.querySelectorAll("noscript")].map((n) => n.textContent ?? "").join(" ")),
           head: document.documentElement.outerHTML.slice(0, 60000),
+          frames: [...document.querySelectorAll("iframe")]
+            .flatMap((f) => [f.getAttribute("src"), f.getAttribute("data-src")])
+            .filter((s): s is string => !!s && s.length < 1000)
+            .slice(0, 40),
         };
       });
       const finalUrl = page.url();
@@ -162,8 +173,21 @@ async function postOf(page: Page, url: string): Promise<Post | null> {
       // The site writes a topic as `#阳台[话题]#`; the marker is its own, not the author's.
       const clean = (v: unknown) => (typeof v === "string" ? v.replace(/\[话题\]/g, "").replace(/\s+/g, " ").trim() : "");
       const title = clean(note.title);
-      const text = [title, clean(note.user?.nickName ?? note.user?.nickname), clean(note.desc)].filter(Boolean).join("\n");
-      return text ? { title, text } : null;
+      const author = clean(note.user?.nickName ?? note.user?.nickname);
+      const desc = clean(note.desc);
+      const text = [title, author, desc].filter(Boolean).join("\n");
+      // A video note says so (`type`), and holds the video's length and its media addresses. Nothing else of the video's data is read.
+      let video: { seconds: number | null; urls: string[] } | undefined;
+      if (note.type === "video") {
+        const length = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+        const streams: unknown[] = Array.isArray(note.video?.media?.stream?.h264) ? note.video.media.stream.h264 : [];
+        video = {
+          seconds: length(note.video?.capa?.duration) ?? length(note.video?.media?.video?.duration),
+          urls: streams.map((s) => (s as { masterUrl?: unknown } | null)?.masterUrl).filter((u): u is string => typeof u === "string"),
+        };
+      }
+      // A video note with nothing written is still a video note.
+      return text || video ? { title, text, bare: !title && !desc, video } : null;
     })
     .catch(() => null);
 }
