@@ -186,9 +186,16 @@ describe("QA #20: uploaded files are read, and a failing analysis stops after th
 });
 
 describe("QA #18: analyses and digests are written in the account's language", () => {
+  // A model that does as it is told: it writes in the language the request names. (The default
+  // stand-in echoes the item's title, which is the very thing the language check looks for.)
+  const obedient = (input: any) =>
+    input.write_in === "English"
+      ? { summary: "A short note.", key_fact: "Text, short", points: ["First point."], verdict: "good_to_know" }
+      : { summary: "一条简短的笔记。", key_fact: "文本，很短", points: ["第一点。"], verdict: "good_to_know" };
+
   it("QA #18: (a) PATCH /v1/settings writes the language, and (b) the built-in assistant reads it at analysis time", async () => {
     const calls: any[] = [];
-    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls) });
+    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { analysis: obedient }) });
     const ann = await signIn(env); // an English account
     await saveText(env, ann.token, "中文测试笔记 — 明天上午十点和产品团队开会。");
     await runMinute(env);

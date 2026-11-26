@@ -82,6 +82,38 @@ export async function dispatchForUser(env: Env, userId: string): Promise<number>
 
 // ---------------------------------------------------------------- worker assistant (steps: analysis, digest)
 
+/**
+ * The language the owner reads (their account's language, QA #18). Said again where the model cannot
+ * miss it: an item in another language, a title or rules in it, make a model write in that
+ * language unless told, in so many words, to translate.
+ */
+const languageRule = (lang: Lang) =>
+  `Every text field you write (summary, key_fact, points, related_hint) is in ${LANG_NAME[lang]}, whatever language the item, its title or the owner's rules are written in: ` +
+  `translate what you report, do not answer in the item's language. Names and short quotations may stay as they are.`;
+
+/** The share of Chinese characters among the letters of a text; null when there are no letters to judge by. */
+function hanShare(text: string): number | null {
+  const han = text.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  const latin = text.match(/[A-Za-z]/g)?.length ?? 0;
+  return han + latin === 0 ? null : han / (han + latin);
+}
+
+/**
+ * Is this prose in the language the owner reads? Judged by the script: mostly Chinese characters for
+ * 简体中文, mostly Latin letters for English. Text with no letters (numbers, symbols) passes, and so
+ * does a mixed text that quotes a few words of the other language.
+ */
+export function writtenIn(lang: Lang, prose: string): boolean {
+  const share = hanShare(prose);
+  if (share === null) return true;
+  return lang === "zh" ? share >= 0.3 : share < 0.3;
+}
+
+const proseOf = (x: any): string =>
+  [x?.summary, x?.key_fact, ...(Array.isArray(x?.points) ? x.points : []), x?.related_hint].filter((v) => typeof v === "string").join("\n");
+
+const hasPoints = (x: any): boolean => Array.isArray(x?.points) && x.points.some((p: unknown) => typeof p === "string" && p.trim());
+
 const ANALYSIS_SYSTEM = (lang: Lang) =>
   `You analyse one saved item for its owner. Write in ${LANG_NAME[lang]}. Answer with JSON only, with exactly these fields:\n` +
   `{"summary": one complete sentence saying what the item is about: at most 60 characters in Chinese or 25 words in a language written with spaces (never more than ${LIMITS.analysis_summary_max_chars} characters);\n` +
@@ -89,7 +121,8 @@ const ANALYSIS_SYSTEM = (lang: Lang) =>
   ` "points": 1 to ${LIMITS.analysis_points_max} complete sentences with the substance (always at least one, however short the item is), each at most ${LIMITS.analysis_point_max_chars} characters;\n` +
   ` "verdict": "worth_deep_dive" | "good_to_know" | "skippable";\n` +
   ` "related_hint": optional, one sentence naming an earlier item, digest or note of the owner (from "related") that this connects to. Leave it out if nothing connects.}\n` +
-  `Judge by the owner's rules if they say what matters. When "length" is given and the key fact mentions how long the text is, use exactly the numbers in it and do not count yourself; mention only what it lists, and do not say where the numbers came from. Never state when the item was saved, in any field: the owner sees that beside the item, and a date or time written in the title or the text is part of the content, not the moment of saving (if it matters, report it as what the text says). Every field must be a finished thought that fits its limit: write shorter rather than be cut off. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.`;
+  `Judge by the owner's rules if they say what matters. When "length" is given and the key fact mentions how long the text is, use exactly the numbers in it and do not count yourself; mention only what it lists, and do not say where the numbers came from. Never state when the item was saved, in any field: the owner sees that beside the item, and a date or time written in the title or the text is part of the content, not the moment of saving (if it matters, report it as what the text says). Every field must be a finished thought that fits its limit: write shorter rather than be cut off. Do not copy long passages. If you cannot read the content at all, answer {"unavailable": true}.` +
+  ` ${languageRule(lang)}`;
 
 /** The length of a text as a reader would count it: words for text written with spaces, characters for Chinese, Japanese and Korean. */
 export function textLength(text: string): { words: number; cjk_characters: number } {
@@ -122,6 +155,7 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   const ctx = await getContext(env, actor, itemId, "analysis", origin);
   if (ctx.item.content_unavailable) return unavailable(itemId);
   const facts = {
+    write_in: LANG_NAME[rules.lang as Lang],
     kind: ctx.item.kind,
     title: ctx.item.title,
     site: ctx.item.site,
@@ -132,7 +166,8 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
     length: ctx.item.body ? nonZero(textLength(ctx.item.body)) : null,
     content: truncate(ctx.item.body ?? "", 24_000),
   };
-  let content: string | ContentBlock[] = JSON.stringify(facts);
+  // `correction` is added to the facts when an answer has to be asked for again.
+  let contentFor = (correction?: string): string | ContentBlock[] => JSON.stringify(correction ? { ...facts, correction } : facts);
   if (!ctx.item.body) {
     // No text. An image or a PDF is looked at by the model itself; a text file's content would
     // already be the body, so anything else here has nothing to read.
@@ -141,23 +176,37 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
       console.warn(`analysis of ${itemId}: no content (${ctx.item.asset_url ? `a ${ctx.item.asset_type ?? "file"} the model cannot be given` : "no text and no file"})`);
       return unavailable(itemId);
     }
-    content = [block, { type: "text", text: JSON.stringify(facts) }];
+    contentFor = (correction) => [block, { type: "text", text: JSON.stringify(correction ? { ...facts, correction } : facts) }];
   }
   let why = "no reply";
-  const ask = () => callModel(env, { timeoutMs: 25_000, maxTokens: 2000, system: ANALYSIS_SYSTEM(rules.lang as Lang), content, onFailure: (reason) => (why = reason) });
+  const lang = rules.lang as Lang;
+  const ask = (correction?: string) =>
+    callModel(env, { timeoutMs: 25_000, maxTokens: 2000, system: ANALYSIS_SYSTEM(lang), content: contentFor(correction), onFailure: (reason) => (why = reason) });
   let reply = await ask();
   if (!reply) return { failure: why };
   let usage = { input: reply.inputTokens, output: reply.outputTokens, model: reply.model };
   let x = extractJson(reply.text) as any;
-  // An analysis without a single key point is asked for once more (QA #69). The second answer is
-  // taken as it is: an item is never called unreadable for lacking key points.
-  if (x && typeof x === "object" && x.unavailable !== true && !(Array.isArray(x.points) && x.points.some((p: unknown) => typeof p === "string" && p.trim()))) {
-    const again = await ask();
-    const y = again ? (extractJson(again.text) as any) : null;
-    if (again && y && typeof y === "object" && y.unavailable !== true && Array.isArray(y.points) && y.points.some((p: unknown) => typeof p === "string" && p.trim())) {
-      usage = { input: usage.input + again.inputTokens, output: usage.output + again.outputTokens, model: again.model };
-      reply = again;
-      x = y;
+  // An answer is asked for once more when it has no key point (QA #69) or is not in the language
+  // the owner reads (QA #18, core#2). The second answer replaces the first only when it is better;
+  // otherwise the first stands: an item is never called unreadable for either.
+  const flaws = (a: any) => ({ points: !hasPoints(a), language: !writtenIn(lang, proseOf(a)) });
+  if (x && typeof x === "object" && x.unavailable !== true) {
+    const bad = flaws(x);
+    if (bad.points || bad.language) {
+      const notes = [
+        bad.language ? `Your previous answer was not in ${LANG_NAME[lang]}. Write every text field in ${LANG_NAME[lang]}, translating from the item.` : "",
+        bad.points ? "Your previous answer had no key point. Give at least one complete sentence in \"points\"." : "",
+      ].filter(Boolean);
+      const again = await ask(notes.join(" "));
+      const y = again ? (extractJson(again.text) as any) : null;
+      if (again && y && typeof y === "object" && y.unavailable !== true) {
+        const worse = (a: any) => Number(flaws(a).points) + Number(flaws(a).language);
+        usage = { input: usage.input + again.inputTokens, output: usage.output + again.outputTokens, model: again.model };
+        if (worse(y) < worse(x)) {
+          reply = again;
+          x = y;
+        }
+      }
     }
   }
   if (!x || typeof x !== "object") return { failure: "the reply is not JSON" };
@@ -241,7 +290,7 @@ export async function analyseForUser(env: Env, userId: string, origin: string): 
 }
 
 const DIGEST_SYSTEM = (lang: Lang) =>
-  `You write the owner's daily digest from the analyses of what they saved. Write in ${LANG_NAME[lang]}. Plain text, no images, no tags, no long quotes. Answer with JSON only:\n` +
+  `You write the owner's daily digest from the analyses of what they saved. Write in ${LANG_NAME[lang]}, whatever language the analyses are in: translate what you report. Plain text, no images, no tags, no long quotes. Answer with JSON only:\n` +
   `{"summary": a few sentences on what was saved, at most 600 characters;\n` +
   ` "worth": [{"item_id": string, "line": one sentence with the conclusion, at most 160 characters}] — only items whose verdict is worth_deep_dive and that the owner has not marked (signal is null) and has not queued;\n` +
   ` "question": one question to sleep on, at most 160 characters}`;
