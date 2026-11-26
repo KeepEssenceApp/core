@@ -239,7 +239,7 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   };
   let noEffort = false;
   const ask = async (correction?: string) => {
-    const r = await callModel(env, { timeoutMs: 25_000, budget, noEffort, maxTokens: 2000, system: ANALYSIS_SYSTEM(lang), content: contentFor(correction), onFailure: (reason) => (why = reason) });
+    const r = await callModel(env, { timeoutMs: 25_000, budget, noEffort, maxTokens: 2000, system: ANALYSIS_SYSTEM(lang), content: contentFor(correction), onFailure: (reason) => (why = reason), onUnusedReply: paid });
     if (r) {
       paid(r);
       if (r.effortRefused) noEffort = true;
@@ -248,14 +248,19 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   };
   const used = (): Spent | null => (spent.calls > 0 ? { ...spent } : null);
   const first = await ask();
-  if (!first) return { failure: why };
+  // A first reply with nothing to use may still have been paid for (a refusal that reported its usage).
+  if (!first) return { failure: why, usage: used() };
   let x = extractJson(first.text) as any;
   // An answer is asked for once more when it has no key point (QA #69) or a field is not in the
   // language the owner reads (QA #18, core#2). The second answer replaces the first only when it is
-  // better (fewer of the two flaws); with the same number the first stands, and so it does when the
-  // second is not JSON or says "unavailable": an item is never called unreadable for either flaw.
+  // better: one that can be handed in (a summary and a verdict) beats one that cannot, and between
+  // two that can, the one with fewer of the two flaws wins. With the same number the first stands, and
+  // so it does when the second is not JSON, says "unavailable" or cannot be handed in: an item is never
+  // called unreadable, nor loses an answer it could have had, for either flaw.
   const flaws = (a: any) => ({ points: !hasPoints(a), language: wrongLanguageFields(lang, a).length > 0 });
   const worse = (a: any) => Number(flaws(a).points) + Number(flaws(a).language);
+  const sound = (a: any) => Boolean(str(a.summary, LIMITS.analysis_summary_max_chars)) && VERDICTS.includes(a.verdict);
+  const better = (y: any, x: any) => (sound(y) !== sound(x) ? sound(y) : worse(y) < worse(x));
   if (x && typeof x === "object" && x.unavailable !== true) {
     const bad = flaws(x);
     const timeLeft = budget.until - Date.now() >= Math.min(8_000, total / 2);
@@ -266,7 +271,7 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
       ].filter(Boolean);
       const again = await ask(notes.join(" "));
       const y = again ? (extractJson(again.text) as any) : null;
-      if (y && typeof y === "object" && y.unavailable !== true && worse(y) < worse(x)) x = y;
+      if (y && typeof y === "object" && y.unavailable !== true && better(y, x)) x = y;
     }
   }
   if (!x || typeof x !== "object") return { failure: "the reply is not JSON", usage: used() };

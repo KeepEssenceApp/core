@@ -188,7 +188,19 @@ describe("core#2: telling the language by its script", () => {
 
 // ---------------------------------------------------------------- the review of core#5 (QA #18, 2026-11-26)
 
-type Step = { json?: unknown; text?: string; status?: number; hang?: boolean; delay?: number; usage?: [number, number] };
+type Step = {
+  json?: unknown;
+  text?: string;
+  status?: number;
+  hang?: boolean;
+  delay?: number;
+  usage?: [number, number];
+  /** An HTTP 200 whose stop_reason is "refusal", or whose content is empty: no text to use, but it may still report usage. */
+  refusal?: boolean;
+  empty?: boolean;
+  /** Leave the usage object out of the reply altogether. */
+  noUsage?: boolean;
+};
 type Asked = { effort: boolean; correction: string | undefined };
 
 /**
@@ -211,6 +223,18 @@ function scripted(steps: Step[], asked: Asked[] = []): Outbound {
     if (step.delay) await new Promise((r) => setTimeout(r, step.delay));
     if (step.hang) return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
     if (step.status) return new Response("no", { status: step.status });
+    if (step.refusal || step.empty) {
+      const [i, o] = step.usage ?? [120, 40];
+      return Response.json({
+        id: "m",
+        type: "message",
+        role: "assistant",
+        model: request.model,
+        stop_reason: step.refusal ? "refusal" : "end_turn",
+        content: step.refusal ? [{ type: "text", text: "I cannot comply." }] : [],
+        ...(step.noUsage ? {} : { usage: { input_tokens: i, output_tokens: o } }),
+      });
+    }
     return reply(step.text ?? step.json, step.usage);
   };
 }
@@ -397,5 +421,91 @@ describe("core#5 review: one bounded budget for everything asked about an item",
     expect(Date.now() - started).toBeLessThan(4000);
     expect(await db(env, "SELECT COUNT(*) AS n FROM analyses")).toEqual([{ n: 0 }]);
     expect(await paid(env)).toMatchObject({ calls: 0 });
+  });
+});
+
+describe("core#5 review, round two: a correction that cannot be used does not push out a usable first answer", () => {
+  // QA's case: an English account, an item whose first answer is a complete analysis in Chinese.
+  const firstUsable = { summary: "这是一条用于检查发布清单的测试笔记。", key_fact: "文本共有三十八个字。", points: ["请在星期五前提交修改。"], verdict: "good_to_know" };
+  const asked = (steps: Step[]) => {
+    const calls: Asked[] = [];
+    return { calls, env: makeEnv({ ...LLM, OUTBOUND: scripted(steps, calls) }) };
+  };
+
+  for (const [what, broken] of [
+    ["no verdict", { summary: "A reminder to prepare the release checklist.", key_fact: "Text, 38 characters", points: ["Send the changes before Friday."] }],
+    ["a verdict that is not one of the three", { summary: "A reminder to prepare the release checklist.", key_fact: "Text, 38 characters", points: ["Send the changes before Friday."], verdict: "maybe" }],
+    ["no summary", { key_fact: "Text, 38 characters", points: ["Send the changes before Friday."], verdict: "good_to_know" }],
+    ["a blank summary", { summary: "   ", key_fact: "Text, 38 characters", points: ["Send the changes before Friday."], verdict: "good_to_know" }],
+  ] as const) {
+    it(`${what}, in the right language and with key points: the first answer stands, both replies are counted, and there is no third request`, async () => {
+      const { env, calls } = asked([{ json: firstUsable, usage: [100, 10] }, { json: broken, usage: [90, 9] }]);
+      await saveText(env, (await signIn(env)).token, ZH_TEXT);
+      await runMinute(env);
+      expect(calls).toHaveLength(2);
+      expect((await analysed(env)).summary).toBe(firstUsable.summary);
+      expect(await paid(env)).toEqual({ i: 190, o: 19, calls: 2, items: 1 });
+    });
+  }
+
+  it("a correction that is whole does replace a first answer that was whole too, when it has fewer flaws", async () => {
+    const whole = { summary: "A reminder to prepare the release checklist.", key_fact: "Text, 38 characters", points: ["Send the changes before Friday."], verdict: "good_to_know" };
+    const { env } = asked([{ json: firstUsable }, { json: whole }]);
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    expect((await analysed(env)).summary).toBe(whole.summary);
+  });
+
+  it("a whole correction does replace a first answer that could not be used at all (no verdict), instead of failing the item", async () => {
+    const noVerdictChinese = { summary: "这是一条用于检查发布清单的测试笔记。", key_fact: "文本共有三十八个字。", points: ["请在星期五前提交修改。"] };
+    const whole = { summary: "A reminder to prepare the release checklist.", key_fact: "Text, 38 characters", points: ["Send the changes before Friday."], verdict: "good_to_know" };
+    const { env } = asked([{ json: noVerdictChinese, usage: [100, 10] }, { json: whole, usage: [90, 9] }]);
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    expect((await analysed(env)).summary).toBe(whole.summary);
+    expect(await paid(env)).toEqual({ i: 190, o: 19, calls: 2, items: 1 });
+  });
+});
+
+describe("core#5 review, round two: what the provider reports is counted whether or not there was text to use", () => {
+  const firstUsable = { summary: "这是一条用于检查发布清单的测试笔记。", key_fact: "文本共有三十八个字。", points: ["请在星期五前提交修改。"], verdict: "good_to_know" };
+  const usage: [number, number] = [140, 25];
+
+  for (const kind of ["refusal", "empty"] as const) {
+    it(`a first reply that is a ${kind} but reports usage is paid for, and the item is tried again`, async () => {
+      const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ [kind]: true, usage }]) });
+      await saveText(env, (await signIn(env)).token, ZH_TEXT);
+      await runMinute(env);
+      expect(await db(env, "SELECT COUNT(*) AS n FROM analyses")).toEqual([{ n: 0 }]);
+      expect(await paid(env)).toEqual({ i: 140, o: 25, calls: 1, items: 0 });
+      // The claim went back: the next round asks again and pays again.
+      await runMinute(env);
+      expect(await paid(env)).toMatchObject({ i: 280, o: 50, calls: 2 });
+    });
+
+    it(`a correction that is a ${kind} but reports usage is paid for, and the first answer stands`, async () => {
+      const calls: Asked[] = [];
+      const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: firstUsable, usage: [100, 10] }, { [kind]: true, usage }], calls) });
+      await saveText(env, (await signIn(env)).token, ZH_TEXT);
+      await runMinute(env);
+      expect(calls).toHaveLength(2);
+      expect((await analysed(env)).summary).toBe(firstUsable.summary);
+      expect(await paid(env)).toEqual({ i: 240, o: 35, calls: 2, items: 1 });
+    });
+
+    it(`a ${kind} that reports no usage is not made up: nothing is counted for it`, async () => {
+      const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ [kind]: true, noUsage: true }]) });
+      await saveText(env, (await signIn(env)).token, ZH_TEXT);
+      await runMinute(env);
+      expect(await paid(env)).toEqual({ i: 0, o: 0, calls: 0, items: 0 });
+    });
+  }
+
+  it("a correction that is a refusal without usage costs nothing more: only the first reply is counted", async () => {
+    const env = makeEnv({ ...LLM, OUTBOUND: scripted([{ json: firstUsable, usage: [100, 10] }, { refusal: true, noUsage: true }]) });
+    await saveText(env, (await signIn(env)).token, ZH_TEXT);
+    await runMinute(env);
+    expect((await analysed(env)).summary).toBe(firstUsable.summary);
+    expect(await paid(env)).toEqual({ i: 100, o: 10, calls: 1, items: 1 });
   });
 });

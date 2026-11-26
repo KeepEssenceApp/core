@@ -37,6 +37,12 @@ export interface ModelRequest {
   noEffort?: boolean;
   /** Told why there is no reply (for the log). Never contains content or the key. */
   onFailure?: (reason: string) => void;
+  /**
+   * Told what a reply that came back with nothing to use (a refusal, no content, an empty text) cost, when
+   * the provider reported it: such a reply is paid for all the same. Not called when the reply carries no
+   * usage (nothing is made up), and not for a reply that is returned (its cost is in the reply).
+   */
+  onUnusedReply?: (cost: { inputTokens: number; outputTokens: number; model: string }) => void;
 }
 
 export const DEFAULT_MODEL = "claude-haiku-5-5";
@@ -100,24 +106,24 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
       return fail(`${what} ${response.status}`);
     }
     const data = (await response.json()) as any;
-    if (data?.stop_reason === "refusal") return fail("model refused");
-    if (!Array.isArray(data?.content)) return fail("reply has no content");
+    const replyModel = typeof data?.model === "string" ? data.model : model;
+    // Gateways that cache prompts report the cached part separately; count all of it as input.
+    const inputTokens =
+      (Number(data?.usage?.input_tokens) || 0) + (Number(data?.usage?.cache_creation_input_tokens) || 0) + (Number(data?.usage?.cache_read_input_tokens) || 0);
+    const outputTokens = Number(data?.usage?.output_tokens) || 0;
+    // A reply with nothing to use still cost what the provider says it cost; one that reports nothing is not made up.
+    const unused = (reason: string) => {
+      if (data?.usage && typeof data.usage === "object") req.onUnusedReply?.({ inputTokens, outputTokens, model: replyModel });
+      return fail(reason);
+    };
+    if (data?.stop_reason === "refusal") return unused("model refused");
+    if (!Array.isArray(data?.content)) return unused("reply has no content");
     const text = data.content
       .filter((b: any) => b?.type === "text" && typeof b.text === "string")
       .map((b: any) => b.text)
       .join("");
-    if (!text.trim()) return fail("reply is empty");
-    return {
-      text,
-      model: typeof data.model === "string" ? data.model : model,
-      // Gateways that cache prompts report the cached part separately; count all of it as input.
-      inputTokens:
-        (Number(data.usage?.input_tokens) || 0) +
-        (Number(data.usage?.cache_creation_input_tokens) || 0) +
-        (Number(data.usage?.cache_read_input_tokens) || 0),
-      outputTokens: Number(data.usage?.output_tokens) || 0,
-      ...(effortRefused ? { effortRefused } : {}),
-    };
+    if (!text.trim()) return unused("reply is empty");
+    return { text, model: replyModel, inputTokens, outputTokens, ...(effortRefused ? { effortRefused } : {}) };
   } catch (e) {
     return fail(abort.signal.aborted ? `no reply within ${timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
   } finally {
