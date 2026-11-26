@@ -38,3 +38,13 @@ jobs:
       - run: npx playwright-core install --with-deps chromium
       - run: npm run typecheck
       - run: npm test
+
+  # The transcription worker (transcriber/): Python standard library only, nothing to install, no network.
+  transcriber:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m unittest discover -s transcriber

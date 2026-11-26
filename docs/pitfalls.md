@@ -60,6 +60,22 @@
 
 **`vitest` 不会去跑 `runner/test`。** core 的 `vitest.config.ts` 只收 `test/**/*.test.ts`；runner 的测试用 `node:test`，在 `runner/` 里 `npm test`，CI 里是单独一项。
 
+## 转写 worker（`transcriber/`）
+
+下面几条都是写这个 worker 和它的测试时碰到的，在本机（macOS，Python 3.9 到 3.14）和一个 Linux 容器（Python 3.11、断网）里跑自动测试验过。MLX 没有装，真正的引擎没有跑过。
+
+**没读完请求体就答，连接会被重置，答案到不了客户端。**
+401、busy 的 503 这类早早就拒绝的情况，一开始答完就关连接；请求体（测试里约 1 MB）还留在套接字里，关的时候系统发 RST，客户端报连接错误，看不到 401 或 503。现在答完以后把剩下的请求体读掉丢掉（busy 最多读到 40 MiB，别的拒绝最多读 1 MiB，总共不超过 10 秒）。把这一步去掉，`test_a_refused_upload_is_still_answered_when_the_body_is_large` 和 busy 那条测试就挂。
+
+**「答完了」之前，引擎要先放开、临时文件要先删掉。**
+第一版是先把答案写给客户端，再在 `finally` 里放锁、删文件。调用方拿到答案立刻发下一条，可能撞上还没放开的锁，得到 busy；检查临时目录的人也可能还看得到文件。现在处理的结果先算出来，放锁、删文件，最后才写答案。注意：连发 30 条请求的测试**抓不到**这个错（窗口太小，改回旧顺序它照样过）。能抓到的是在写日志的那一刻（就在写答案之前）看锁和临时目录，`test_the_engine_is_free_and_the_file_gone_before_the_answer_goes_out`。
+
+**`serve_forever()` 的轮询间隔让每条测试多等半秒。**
+`shutdown()` 要等循环醒来，默认 0.5 秒，一百多条测试跑了 20 秒。测试里用 `serve_forever(0.01)`，现在 2 秒。
+
+**做变异检查（临时改源码再还原）时，还原也要用 `/bin/cp -f`。**
+脚本里的 `cp` 又是带确认的别名，停在「overwrite? (y/n)」，源码留在改坏的状态，要手工还原。先把原文件另存一份，还原后用 `diff` 确认。
+
 ## Workers 运行时
 
 **往 R2 流式写入必须知道长度**

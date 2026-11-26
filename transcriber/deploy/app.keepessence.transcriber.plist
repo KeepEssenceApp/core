@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- A launchd user agent. __HOME__ is replaced by the real home directory when it is installed (launchd does not expand ~ or $HOME). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>app.keepessence.transcriber</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/ke-transcriber/app/deploy/run.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__HOME__/ke-transcriber/app</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/ke-transcriber.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/ke-transcriber.log</string>
+</dict>
+</plist>
