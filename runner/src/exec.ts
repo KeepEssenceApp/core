@@ -10,11 +10,18 @@ export interface RunOptions {
   /** Keep what the program prints on stdout, up to this many bytes (more kills it). Otherwise stdout is thrown away. */
   capture?: number;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Look in what the program says about its trouble for "HTTP Error <number>" and give that number back as `status`.
+   * Nothing else of it is kept: it holds addresses, and it is read and thrown away as it comes.
+   */
+  watchStatus?: boolean;
 }
 
 export interface RunResult {
   code: number | null;
   stdout: string;
+  /** The first "HTTP Error <number>" the program said, when `watchStatus` was asked for. */
+  status: number | null;
 }
 
 /**
@@ -33,7 +40,7 @@ export function run(file: string, args: readonly string[], opts: RunOptions): Pr
     let child;
     try {
       // `detached`: the program gets a process group of its own, so that what it started (yt-dlp starts ffmpeg) is killed with it.
-      child = spawn(file, args, { stdio: ["ignore", opts.capture ? "pipe" : "ignore", "ignore"], env: opts.env ?? childEnv(), detached: true, shell: false, windowsHide: true });
+      child = spawn(file, args, { stdio: ["ignore", opts.capture ? "pipe" : "ignore", opts.watchStatus ? "pipe" : "ignore"], env: opts.env ?? childEnv(), detached: true, shell: false, windowsHide: true });
     } catch {
       return reject(new Error("could not start"));
     }
@@ -67,6 +74,15 @@ export function run(file: string, args: readonly string[], opts: RunOptions): Pr
       opts.signal.removeEventListener("abort", onAbort);
       fn();
     };
+    let status: number | null = null;
+    let tail = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (status !== null) return;
+      const text = tail + chunk.toString("latin1");
+      const found = /HTTP Error (\d{3})/.exec(text);
+      if (found) status = Number(found[1]);
+      tail = text.slice(-24); // enough to join a message cut between two chunks
+    });
     child.stdout?.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > (opts.capture ?? 0)) return stop("too much output");
@@ -74,7 +90,7 @@ export function run(file: string, args: readonly string[], opts: RunOptions): Pr
     });
     child.on("error", () => settle(() => reject(new Error("could not start"))));
     child.on("close", (code) => {
-      settle(() => (stopped ? reject(new Error(stopped)) : resolve({ code, stdout: Buffer.concat(chunks).toString("utf8") })));
+      settle(() => (stopped ? reject(new Error(stopped)) : resolve({ code, stdout: Buffer.concat(chunks).toString("utf8"), status })));
     });
   });
 }

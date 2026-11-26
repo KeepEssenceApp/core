@@ -93,6 +93,8 @@
 
 **B站给手机端的是 `m.bilibili.com/video/BV…?site=OVERSEAS&lang=…`，yt-dlp 在那个地址上什么也读不到。** runner 先用 iPhone 身份读页面（B站在「手机优先」名单里），浏览器就落在了手机站；用落地的地址去问时长，得到 `null`，视频被判成「没取到」（`unavailable`），而不是「太长」或开始读。现在凡是 `bilibili.com` 下 `/video/BV…`、`/video/av…` 的地址，都改成同一个视频在 `www.bilibili.com` 上的页面，只留分 P 的 `p`。是用真视频（一条 20 分钟的央视新闻）在 think 上才发现的；测试里的假页面是 `www` 的，看不出来。
 
+**yt-dlp 的 stderr 一直被丢掉，所以看不到站点回的是 567。** Bilibili 的 CDN 拒绝下载时回 HTTP 567（yt-dlp 写 `HTTP Error 567`），而下载是 HTTPS，代理只看得到一条 CONNECT 隧道，看不见状态码。只能从 yt-dlp 的输出里读：`exec.ts` 的 `watchStatus` 只取 `HTTP Error <三位数>` 这个数字，其余（里面有地址）读完即丢，不进错误、不进日志。冷却按站点名（`bilibili.com`，`b23.tv` 算同一个站）记在内存里，只记名字不记地址；重启就忘，所以重启后第一个视频会再被拒一次，再开始冷却。
+
 ## Workers 运行时
 
 **往 R2 流式写入必须知道长度**

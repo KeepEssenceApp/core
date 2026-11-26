@@ -21,6 +21,8 @@ export interface Config {
   /** Video jobs running at once, and waiting for a place: when both are full the answer is "unavailable" at once. */
   videoConcurrency: number;
   videoQueue: number;
+  /** After a site refuses a download (567, 412, 429) its videos are "unavailable" at once for this long, in milliseconds. 0: no cool-down. */
+  videoCooldownMs: number;
   /** The programs (names or paths); they are run with argument lists, never through a shell. */
   ytdlp: string;
   ffmpeg: string;
@@ -31,6 +33,8 @@ export interface Config {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const num = (v: string | undefined, d: number) => (v && Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
+  // Hours, with 0 allowed (no cool-down); anything that is not a number of hours is the default.
+  const hours = (v: string | undefined, d: number) => (v !== undefined && v.trim() !== "" && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : d);
   const key = env.RUNNER_KEY ?? "";
   if (key.length < 24) throw new Error("RUNNER_KEY must be set to a secret of at least 24 characters");
   // A worker address that is not an address, or without its secret, is a mistake to hear about at start-up, not a video that never reads.
@@ -60,6 +64,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     videoMaxMinutes: num(env.RUNNER_VIDEO_MAX_MINUTES, 15),
     videoConcurrency: num(env.RUNNER_VIDEO_CONCURRENCY, 1),
     videoQueue: num(env.RUNNER_VIDEO_QUEUE, 4),
+    videoCooldownMs: hours(env.RUNNER_VIDEO_COOLDOWN_HOURS, 6) * 3600 * 1000,
     ytdlp: env.RUNNER_YTDLP || "yt-dlp",
     ffmpeg: env.RUNNER_FFMPEG || "ffmpeg",
     transcribeUrl,

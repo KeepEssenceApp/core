@@ -13,12 +13,22 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isPublicUrl } from "../../src/services/publicurl.ts";
 import type { Config } from "./config.ts";
+import { COOLDOWN_STATUSES } from "./cooldown.ts";
 import type { VideoRef } from "./detect.ts";
 import { childEnv, run } from "./exec.ts";
 import type { FilteringProxy } from "./proxy.ts";
 import { transcribeFile, type Transcript } from "./transcribe.ts";
 
 export type MediaRef = Exclude<VideoRef, { kind: "unsupported" }>;
+
+/** The site refused (567, 412 or 429): not a video that cannot be read, but a door that is shut, and the jobs start a cool-down for it. */
+export class Refused extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`the site refused (status ${status})`);
+    this.status = status;
+  }
+}
 
 export interface Pipeline {
   /** The length of the video at a media page, in seconds; null when it cannot be told (not found, a live stream, a login). */
@@ -101,8 +111,11 @@ export function createPipeline(cfg: Config, proxy: FilteringProxy): Pipeline {
       const read = proxy.open(PROBE_BYTES);
       try {
         const via = proxyUrl(proxy.port, read);
-        const out = await run(cfg.ytdlp, ytdlpProbeArgs({ proxy: via, page }), { signal, timeoutMs: PROBE_MS, capture: 4 * 1024 * 1024, env: proxyEnv(via) });
-        if (out.code !== 0) return null;
+        const out = await run(cfg.ytdlp, ytdlpProbeArgs({ proxy: via, page }), { signal, timeoutMs: PROBE_MS, capture: 4 * 1024 * 1024, env: proxyEnv(via), watchStatus: true });
+        if (out.code !== 0) {
+          if (out.status !== null && COOLDOWN_STATUSES.has(out.status)) throw new Refused(out.status);
+          return null;
+        }
         const line = out.stdout.split("\n").find((l) => l.trim());
         if (!line) return null;
         const info = JSON.parse(line) as { duration?: unknown; is_live?: unknown };
@@ -117,15 +130,21 @@ export function createPipeline(cfg: Config, proxy: FilteringProxy): Pipeline {
       const urls = (ref.kind === "direct" ? ref.urls : [ref.page]).filter(isPublicUrl);
       const referer = ref.kind === "direct" ? ref.referer : undefined;
       const until = Date.now() + DOWNLOAD_MS;
+      let refused: number | null = null;
       for (const url of urls) {
         const left = until - Date.now();
         if (left <= 0) break;
         const read = proxy.open(VIDEO_BYTES);
         try {
           const via = proxyUrl(proxy.port, read);
-          const out = await run(cfg.ytdlp, ytdlpDownloadArgs({ proxy: via, url, dir, referer, ffmpeg: ffmpegLocation }), { signal, timeoutMs: left, env: proxyEnv(via) });
+          const out = await run(cfg.ytdlp, ytdlpDownloadArgs({ proxy: via, url, dir, referer, ffmpeg: ffmpegLocation }), { signal, timeoutMs: left, env: proxyEnv(via), watchStatus: true });
           const file = out.code === 0 ? await mediaIn(dir) : null;
           if (file) return file;
+          // A site that has shut the door: the next address of the same video would only be another knock.
+          if (out.status !== null && COOLDOWN_STATUSES.has(out.status)) {
+            refused = out.status;
+            break;
+          }
         } catch {
           if (signal.aborted) throw new Error("aborted");
           // This address did not work; the next one may.
@@ -133,6 +152,7 @@ export function createPipeline(cfg: Config, proxy: FilteringProxy): Pipeline {
           read.close();
         }
       }
+      if (refused !== null) throw new Refused(refused);
       throw new Error("no media was downloaded");
     },
 

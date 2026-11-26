@@ -102,3 +102,22 @@ export function videoOfNote(note: NoteVideo, pageUrl: string): VideoRef {
   }
   return { kind: "direct", urls, seconds, referer: `${origin}/` };
 }
+
+/** A short link's own site is not the site that holds the video. */
+const SITE_ALIASES: Record<string, string> = { "b23.tv": "bilibili.com" };
+
+/**
+ * The site a video belongs to, as one name (`bilibili.com`), for what is kept per site, such as the cool-down. From where
+ * the video is asked for: its media page, or the page a note's own media addresses came from. null when there is none.
+ */
+export function siteOfRef(ref: VideoRef): string | null {
+  const at = ref.kind === "page" ? ref.page : ref.kind === "direct" ? ref.referer : "";
+  const host = hostOf(at);
+  if (!host) return null;
+  const labels = host.split(".");
+  if (labels.length < 2) return null;
+  // `www.example.co.uk` is `example.co.uk`, `www.bilibili.com` is `bilibili.com`.
+  const second = labels[labels.length - 2];
+  const registrable = labels.length >= 3 && labels[labels.length - 1].length === 2 && /^(co|com|org|net|gov|edu|ac)$/.test(second) ? labels.slice(-3).join(".") : labels.slice(-2).join(".");
+  return SITE_ALIASES[registrable] ?? registrable;
+}
