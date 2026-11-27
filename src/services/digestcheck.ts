@@ -15,7 +15,8 @@
 //   - but the digest itself as the subject is a whole-set claim, whatever is said about the set after the number:
 //     "This digest covers 15 items, which span tea and coffee", "这份每日摘要汇总了15条关于茶的解读" count 15.
 //     That needs both: the digest (or the summary) before the number, and a verb of scope (covers, 汇总了, 涵盖了 ...).
-//     A topic after "saved 3 items" or "共 3 条" is still a part.
+//     A topic after "saved 3 items" or "共 3 条" is still a part, and so is a number the digest gives next to
+//     another count or "the rest" ("covers 3 items about tea and 13 about coffee", "其余 13 条").
 // A summary that does not agree is never stored: the built-in assistant asks once more,
 // then writes the sentence itself from the snapshot (see fallbackSummary); another assistant is
 // refused with the reason, as the contract says for a result that breaks a field rule.
@@ -81,6 +82,15 @@ const DIGEST_FRAME = /\bdigest\b|\bsummary\b|这份|本份|这一份|该份|摘�
 const SCOPE_VERB_EN = /^(?:covers?|covered|covering|summari[sz]ed)\b/i;
 const SCOPE_VERB_ZH = /^(?:涵盖了?|包含了?|汇总了?)/;
 
+/**
+ * After a digest's own count and its topic: another count, or "the rest". Then what was just counted is one part of what the digest
+ * covers ("This digest covers 3 items about tea and 13 about coffee", "这份摘要汇总了3条讲茶的，其余13条讲咖啡"), not the whole.
+ */
+const PARTITION_AFTER = new RegExp(
+  `\\b(?:rest|others?|remaining|remainder)\\b|\\b(?:${EN_NUM})\\s+(?:more\\s+|other\\s+|further\\s+|new\\s+)?(?:${EN_THING}|about|on|regarding|from|in|for|were|are|came)\\b|其余|其他|其它|另外|另有|还有|剩下|(?:${ZH_NUM})\\s*${ZH_UNIT}`,
+  "i",
+);
+
 /** The words that say a bare total is about the whole day, not about a topic. */
 const WHOLE_DAY_ZH = /今天|今日|当天|本日|这份|摘要|每日|全部|所有|整天|一天|总体|汇总/;
 
@@ -126,7 +136,10 @@ export function statedTotals(summary: string): number[] {
       // The digest itself as the subject of a verb of scope: the number is how many it covers, whatever is said of them after it.
       const ofTheDigest = scope !== undefined && scope.test(m[0]) && DIGEST_FRAME.test(before);
       // A part, not the whole: something said earlier makes what follows a subset, or a topic or a source follows.
-      if (SUBSET_BEFORE.test(before) || (!ofTheDigest && after.test(summary.slice(from + m[0].length, sentence.end)))) continue;
+      const rest = summary.slice(from + m[0].length, sentence.end);
+      // ... unless the digest puts a topic after the number and then another count or "the rest" (PARTITION_AFTER): then
+      // what was counted is one part of the set. A breakdown after the whole ("covers 15 items: 3 about tea and 12 ...") is not that.
+      if (SUBSET_BEFORE.test(before) || (ofTheDigest ? after.test(rest) && PARTITION_AFTER.test(rest) : after.test(rest))) continue;
       // A bare total word is about the whole day only in the first sentence or beside a whole-day word.
       if (tier === "bare" && sentenceIndex > 0 && !WHOLE_DAY_ZH.test(before)) continue;
       found.set(at, n);

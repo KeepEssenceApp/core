@@ -198,3 +198,22 @@ describe("internal-qa #27 (QA's review of a3c855e): the digest as the subject of
     }
   });
 });
+
+describe("core#18 review: the digest's own count, said next to another count or the rest, is a part and not a claim", () => {
+  it("a partition after the number is not the total; the digest's whole count beside a clause about the set still is", () => {
+    for (const text of [
+      "This digest covers 3 items about tea and 13 about coffee.",
+      "This digest covers 3 items about tea and the rest about coffee.",
+      "This digest covers 3 items about tea, 13 items about coffee.",
+      "这份摘要汇总了3条关于茶的解读，其余13条关于咖啡。",
+      "这份每日摘要汇总了3条讲茶的，13条讲咖啡的。",
+    ]) expect(`${text} => ${statedTotals(text)}`).toBe(`${text} => `);
+    // A summary that gives the whole and then its breakdown is read by the whole, right or wrong.
+    expect(wrongTotal("This digest covers 16 items: 3 about tea and 13 about coffee.", 16)).toBeNull();
+    expect(wrongTotal("This digest covers 16 items, 3 about tea and 13 about coffee.", 16)).toBeNull();
+    expect(wrongTotal("This digest covers 15 items: 3 about tea and 12 about coffee.", 16)).toBe(15);
+    expect(wrongTotal("这份每日摘要汇总了15条：3条讲茶，12条讲咖啡。", 16)).toBe(15);
+    expect(wrongTotal("This digest covers 15 items, which span tea and coffee.", 16)).toBe(15);
+    expect(wrongTotal("这份每日摘要汇总了15条关于茶的解读。", 16)).toBe(15);
+  });
+});
