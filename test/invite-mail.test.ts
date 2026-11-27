@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { advance, MINUTE } from "../src/clock";
 import { runMinute } from "../src/cron";
 import { LIMITS } from "../src/env";
-import { INVITE_MAILS_PER_RUN, sendInviteMails, SENDING_UNCONFIRMED_AFTER } from "../src/services/invitemail";
+import { INVITE_MAILS_PER_RUN, sendInviteMails, SENDING_UNCONFIRMED_AFTER, settleInviteMails } from "../src/services/invitemail";
 import { safeWhy, SEND_TIMEOUT_MS, sendMail } from "../src/services/mail";
 import { bareAddress, mailContext, MAIL_BRAND, renderInviteMail, renderSigninMail, type MailContext } from "../src/services/mailcopy";
 import { ADMIN, call, db, makeEnv, type Outbound } from "./helpers";
@@ -371,6 +371,13 @@ describe("#106 the invitation notice", () => {
     await runMinute(env);
     for (const [to, , reason] of cases) expect(await stateOf(env, to)).toMatchObject({ state: "failed", reason });
     expect(sent).toHaveLength(cases.length);
+    // Neither kind is asked again, however many minutes go by.
+    for (let i = 0; i < 3; i++) {
+      advance(MINUTE);
+      await runMinute(env);
+    }
+    expect(sent).toHaveLength(cases.length);
+    for (const [to, , reason] of cases) expect(await stateOf(env, to)).toMatchObject({ state: "failed", reason });
   });
 
   it("a send call that does not answer in time is unconfirmed and is aborted; the cut-off of a sending invitation is far above one call's timeout", async () => {
@@ -513,6 +520,101 @@ describe("#106 the invitation notice", () => {
     expect(code).toEqual([undefined]);
   });
 
+  it("a provider that sends the headers and never finishes the body cannot hold the call: the whole exchange has one deadline, and the result is unconfirmed", async () => {
+    const stalled = (status: number) => () => new Response(new ReadableStream({ start: (c) => c.enqueue(new TextEncoder().encode("partial")) /* never closes */ }), { status });
+    const mail = { to: "ann@example.com", subject: "s", text: "t", html: "h" };
+    for (const status of [503, 422, 302]) {
+      const env = makeEnv({ ...MAIL, OUTBOUND: async () => stalled(status)() });
+      const began = Date.now();
+      expect(await sendMail(env, mail, 60)).toMatchObject({ outcome: "unconfirmed", why: "timed out" });
+      expect(Date.now() - began).toBeLessThan(2000);
+    }
+    // A plain yes whose body never ends is still a yes: the body is dropped, not waited for.
+    const yes = makeEnv({ ...MAIL, OUTBOUND: async () => new Response(new ReadableStream({ start: (c) => c.enqueue(new Uint8Array([1])) }), { status: 200 }) });
+    expect(await sendMail(yes, mail, 500)).toEqual({ outcome: "accepted" });
+  });
+
+  it("an error body is read for the log only, and only the first few hundred bytes of it", async () => {
+    let pulls = 0;
+    const endless = () =>
+      new Response(new ReadableStream({ pull: (c) => { pulls++; c.enqueue(new TextEncoder().encode("x".repeat(100))); } }), { status: 500 });
+    const env = makeEnv({ ...MAIL, OUTBOUND: async () => endless() });
+    const result = await sendMail(env, { to: "ann@example.com", subject: "s", text: "t", html: "h" }, 2000);
+    expect(result).toMatchObject({ outcome: "unconfirmed" });
+    expect((result as { why: string }).why.length).toBeLessThanOrEqual(120);
+    expect(pulls).toBeLessThan(40); // stopped near 512 bytes, not after reading everything
+  });
+
+  it("a stalled answer for one invitation does not hold up the next in the same run: it is unconfirmed, the other goes out, and neither is asked again", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sent: Sent[] = [];
+    const env = makeEnv({
+      ...MAIL,
+      OUTBOUND: async (url, init) => {
+        const body = JSON.parse(String(init?.body));
+        sent.push({ url, body });
+        if (body.to[0] === "a-stalls@example.com") return new Response(new ReadableStream({ start: (c) => c.enqueue(new TextEncoder().encode("partial")) }), { status: 503 });
+        return Response.json({ id: "x" });
+      },
+    });
+    await admin(env, "POST", "/admin/invites", { emails: ["a-stalls@example.com", "b-fine@example.com"] });
+    await sendInviteMails(env, 60);
+    expect(await stateOf(env, "a-stalls@example.com")).toMatchObject({ state: "failed", reason: "unconfirmed" });
+    expect(await stateOf(env, "b-fine@example.com")).toMatchObject({ state: "accepted", reason: null });
+    for (let i = 0; i < 3; i++) {
+      advance(MINUTE);
+      await runMinute(env);
+    }
+    expect(sent.map((s) => s.body.to[0])).toEqual(["a-stalls@example.com", "b-fine@example.com"]);
+  });
+
+  it("a send that times out through the queue is unconfirmed, the call is aborted, and later Cron runs do not ask again", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let asked = 0;
+    let aborted = false;
+    const env = makeEnv({
+      ...MAIL,
+      OUTBOUND: (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          asked++;
+          init?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new Error("aborted"));
+          });
+        }),
+    });
+    await admin(env, "POST", "/admin/invites", { email: "ann@example.com" });
+    await sendInviteMails(env, 40);
+    expect(aborted).toBe(true);
+    expect(await stateOf(env, "ann@example.com")).toMatchObject({ state: "failed", reason: "unconfirmed" });
+    for (let i = 0; i < 3; i++) {
+      advance(20 * MINUTE);
+      await runMinute(env);
+    }
+    expect(asked).toBe(1);
+  });
+
+  it("a late result for an invitation that was already settled as unconfirmed is dropped, accepted or refused alike", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sent: Sent[] = [];
+    let env: any;
+    env = makeEnv({
+      ...MAIL,
+      OUTBOUND: resend(sent, async (s) => {
+        // While this request is in flight, 15 minutes pass and another run settles the invitation as unconfirmed.
+        advance(SENDING_UNCONFIRMED_AFTER + 1000);
+        await settleInviteMails(env);
+        return s.body.to[0] === "ann@example.com" ? Response.json({ id: "x" }) : new Response("no", { status: 422 });
+      }),
+    });
+    for (const email of ["ann@example.com", "bob@example.com"]) {
+      await admin(env, "POST", "/admin/invites", { email });
+      await sendInviteMails(env);
+      expect(await stateOf(env, email)).toMatchObject({ state: "failed", reason: "unconfirmed" }); // neither the late "accepted" nor the late "refused" changed it
+    }
+    expect(sent.map((s) => s.body.to[0])).toEqual(["ann@example.com", "bob@example.com"]);
+  });
+
   it("with no mail service the invitation is recorded as not sent, and configuring one later does not send it", async () => {
     const sent: Sent[] = [];
     const quiet = makeEnv({ OUTBOUND: resend(sent) });
@@ -583,28 +685,33 @@ describe("#106 the invitation notice", () => {
     expect((await stateOf(env, "ann@example.com")).state).toBe("accepted");
   });
 
-  it("a late result for an old invitation is dropped, even when the new invitation of the same address is already sending: results are written by invitation id, not by address", async () => {
+  it("a late result for an old invitation (accepted or refused) is dropped, even when the new invitation of the same address is already sending: results are written by invitation id, not by address", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const sent: Sent[] = [];
+    const newIds: Record<string, string> = {};
     let env: any;
-    let newId = "";
     env = makeEnv({
       ...MAIL,
-      OUTBOUND: resend(sent, async () => {
+      OUTBOUND: resend(sent, async (s) => {
+        const email = s.body.to[0];
         // While the old invitation's request is in flight: withdrawn, invited again, and that new invitation is claimed (sending) by another run.
-        await admin(env, "DELETE", "/admin/invites", { email: "ann@example.com" });
-        await admin(env, "POST", "/admin/invites", { email: "ann@example.com" });
-        await db(env, "UPDATE invites SET invite_mail_state = 'sending', invite_mail_at = ? WHERE email = 'ann@example.com'", Date.UTC(2026, 10, 24, 4, 0, 0));
-        newId = (await db(env, "SELECT invite_id FROM invites WHERE email = 'ann@example.com'"))[0].invite_id;
-        return Response.json({ id: "x" }); // the old invitation's "accepted"
+        await admin(env, "DELETE", "/admin/invites", { email });
+        await admin(env, "POST", "/admin/invites", { email });
+        await db(env, "UPDATE invites SET invite_mail_state = 'sending', invite_mail_at = ? WHERE email = ?", Date.UTC(2026, 10, 24, 4, 0, 0), email);
+        newIds[email] = (await db(env, "SELECT invite_id FROM invites WHERE email = ?", email))[0].invite_id;
+        // The old invitation's result arrives now: a yes for ann, a no for bob.
+        return email === "ann@example.com" ? Response.json({ id: "x" }) : new Response("no", { status: 422 });
       }),
     });
-    await admin(env, "POST", "/admin/invites", { email: "ann@example.com" });
-    const oldId = (await db(env, "SELECT invite_id FROM invites WHERE email = 'ann@example.com'"))[0].invite_id;
-    await sendInviteMails(env);
-    expect(sent).toHaveLength(1);
-    expect(newId).not.toBe(oldId);
-    const row = (await db(env, "SELECT invite_id, invite_mail_state AS state FROM invites WHERE email = 'ann@example.com'"))[0];
-    expect(row).toEqual({ invite_id: newId, state: "sending" }); // the old result neither overwrote it nor made it accepted
+    for (const email of ["ann@example.com", "bob@example.com"]) {
+      await admin(env, "POST", "/admin/invites", { email });
+      const oldId = (await db(env, "SELECT invite_id FROM invites WHERE email = ?", email))[0].invite_id;
+      await sendInviteMails(env);
+      expect(newIds[email]).not.toBe(oldId);
+      const row = (await db(env, "SELECT invite_id, invite_mail_state AS state, invite_mail_reason AS reason FROM invites WHERE email = ?", email))[0];
+      expect(row).toEqual({ invite_id: newIds[email], state: "sending", reason: null }); // the old result neither overwrote it nor decided it
+    }
+    expect(sent).toHaveLength(2);
   });
 
   it("a send cut off before its result was written is not claimed again, and after 15 minutes it is recorded as failed / unconfirmed, not resent", async () => {

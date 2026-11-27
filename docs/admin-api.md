@@ -88,7 +88,7 @@ VAPID keys are. `version` is the variable `CORE_VERSION` when it is set, otherwi
   one. An address that is `already` invited is not touched. Removing an invitation and inviting again
   is a new invitation with a new id. The invitation id is also sent as Resend's `Idempotency-Key`;
   that can only reduce duplicates at the service, it does not make a promise about what the service does.
-  One send call is given 30 seconds (`SEND_TIMEOUT_MS`); the 15 minutes after which `sending` becomes
+  One send call is given 30 seconds (`SEND_TIMEOUT_MS`) for the whole exchange, the answer's body included (an error body is read for the log only, at most 512 bytes of it); the 15 minutes after which `sending` becomes
   `unconfirmed` (`SENDING_UNCONFIRMED_AFTER`) must stay far above it.
 - `DELETE /admin/invites` with `{ "email": "…" }` → 204. Does not touch an existing account.
 - `POST /admin/login-codes` with `{ "email": "…" }` → 201 `{ "email": "…", "code": "123456", "expires_at": "…" }`;

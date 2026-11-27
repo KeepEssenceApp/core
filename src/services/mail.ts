@@ -60,6 +60,40 @@ async function within<T>(ms: number, call: (signal: AbortSignal) => Promise<T>):
   }
 }
 
+/** An error answer's body is read for the log only, and at most this many bytes of it. */
+const ERROR_BODY_BYTES = 512;
+
+/** At most `max` bytes of the body as text, then the rest is dropped. Runs inside `within`, so a body that never ends is cut at the deadline. */
+async function readSome(response: Response, max: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < max) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      size += value.length;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  const joined = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) {
+    joined.set(part, at);
+    at += part.length;
+  }
+  return new TextDecoder().decode(joined.subarray(0, max));
+}
+
+/** Drops a body nobody needs (the answer was a plain yes). */
+async function discardBody(response: Response): Promise<string> {
+  await response.body?.cancel().catch(() => {});
+  return "";
+}
+
 /**
  * Sends one mail, HTML and plain text together, and says what the provider answered. It never
  * throws and never writes the mail's content anywhere.
@@ -72,8 +106,10 @@ export async function sendMail(env: Env, mail: Mail, timeoutMs = SEND_TIMEOUT_MS
       await within(timeoutMs, () => env.EMAIL!.send({ to: mail.to, from: env.EMAIL_FROM!, subject: mail.subject, text: mail.text, html: mail.html }));
       return { outcome: "accepted" };
     }
-    const response = await within(timeoutMs, (signal) =>
-      outbound(env, "https://api.resend.com/emails", {
+    // The whole exchange has one deadline: the request, the answer's headers, and the little of the body that is
+    // read for the log. A provider that sends headers and then never finishes the body cannot hold the send loop.
+    const { status, ok, said } = await within(timeoutMs, async (signal) => {
+      const response = await outbound(env, "https://api.resend.com/emails", {
         method: "POST",
         headers: {
           authorization: `Bearer ${env.RESEND_API_KEY}`,
@@ -82,12 +118,10 @@ export async function sendMail(env: Env, mail: Mail, timeoutMs = SEND_TIMEOUT_MS
         },
         body: JSON.stringify({ from: env.EMAIL_FROM, to: [mail.to], subject: mail.subject, text: mail.text, html: mail.html }),
         signal,
-      }),
-    );
-    const status = response.status;
-    const said = response.ok ? "" : (await response.clone().text().catch(() => "")).slice(0, 120);
-    await response.body?.cancel().catch(() => {});
-    if (response.ok) return { outcome: "accepted" };
+      });
+      return { status: response.status, ok: response.ok, said: response.ok ? await discardBody(response) : await readSome(response, ERROR_BODY_BYTES) };
+    });
+    if (ok) return { outcome: "accepted" };
     // A 4xx is the provider saying no. A 5xx, a redirect or anything else may have been taken or not.
     return { outcome: status >= 400 && status < 500 ? "refused" : "unconfirmed", why: safeWhy(`${status} ${said}`) };
   } catch (e) {

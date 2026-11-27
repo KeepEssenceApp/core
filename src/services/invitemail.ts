@@ -23,7 +23,7 @@
 import { MINUTE, now } from "../clock";
 import type { Env } from "../env";
 import type { Lang } from "../errors";
-import { mailConfigured, sendMail } from "./mail";
+import { mailConfigured, SEND_TIMEOUT_MS, sendMail } from "./mail";
 import { mailContext, renderInviteMail } from "./mailcopy";
 
 export type InviteMailState = "queued" | "sending" | "accepted" | "failed" | "not_sent";
@@ -72,7 +72,7 @@ interface Claimed {
   lang: Lang | null;
 }
 
-async function sendOne(env: Env, row: Claimed): Promise<void> {
+async function sendOne(env: Env, row: Claimed, sendTimeoutMs: number): Promise<void> {
   // Withdrawn between the claim and now (the row is gone, or is another invitation): nothing goes out.
   const current = await env.DB.prepare("SELECT 1 FROM invites WHERE invite_id = ?1 AND invite_mail_state = 'sending'").bind(row.invite_id).first();
   if (!current) return;
@@ -84,7 +84,7 @@ async function sendOne(env: Env, row: Claimed): Promise<void> {
     await record(env, row.invite_id, "failed", "error");
     return;
   }
-  const result = await sendMail(env, { to: row.email, ...mail, idempotencyKey: row.invite_id });
+  const result = await sendMail(env, { to: row.email, ...mail, idempotencyKey: row.invite_id }, sendTimeoutMs);
   if (result.outcome === "accepted") {
     await record(env, row.invite_id, "accepted", null);
     return;
@@ -94,8 +94,11 @@ async function sendOne(env: Env, row: Claimed): Promise<void> {
   await record(env, row.invite_id, "failed", result.outcome);
 }
 
-/** The minute Cron's share: settle, then claim a few queued invitations and send each. Returns how many it claimed. */
-export async function sendInviteMails(env: Env): Promise<number> {
+/**
+ * The minute Cron's share: settle, then claim a few queued invitations and send each, one after the other.
+ * Returns how many it claimed. `sendTimeoutMs` is one send call's whole deadline (the tests shorten it).
+ */
+export async function sendInviteMails(env: Env, sendTimeoutMs = SEND_TIMEOUT_MS): Promise<number> {
   await settleInviteMails(env);
   if (!mailConfigured(env)) return 0;
   const claimed = await env.DB.prepare(
@@ -106,6 +109,6 @@ export async function sendInviteMails(env: Env): Promise<number> {
   )
     .bind(now(), INVITE_MAILS_PER_RUN)
     .all<Claimed>();
-  for (const row of claimed.results) await sendOne(env, row);
+  for (const row of claimed.results) await sendOne(env, row, sendTimeoutMs);
   return claimed.results.length;
 }
