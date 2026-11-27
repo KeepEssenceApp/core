@@ -705,13 +705,15 @@ describe("P5 review: the sentence the core writes when a digest's number will no
    * states the wrong number every time (in the language it was told to write in), so that the second ask fails and the
    * core writes the sentence itself. Returns what was stored and how often the model was asked.
    */
-  async function fallbackDigest(texts: string[], opts: { account: "en" | "zh"; mine?: boolean }) {
+  async function fallbackDigest(texts: string[], opts: { account: "en" | "zh"; mine?: boolean; analysis?: (input: any) => unknown; secondAskUnusable?: boolean }) {
     const calls: any[] = [];
     const model = modelStub((req) => {
       const content = req.messages[0].content;
       const input = JSON.parse(typeof content === "string" ? content : content.find((b: any) => b.type === "text").text);
       if (req.system.startsWith("You sort")) return input.items.map((i: any) => ({ item_id: i.item_id }));
-      if (req.system.startsWith("You analyse")) return byItem(input);
+      if (req.system.startsWith("You analyse")) return (opts.analysis ?? byItem)(input);
+      // The second ask gets no usable answer (not JSON): the core's sentence is written then too, not only when the number is wrong twice.
+      if (opts.secondAskUnusable && calls.filter((c) => c.request.system.startsWith("You write")).length === 2) return "not json";
       // The digest: one more than the snapshot has, in the language the system prompt asks for (Chinese when it says 简体中文).
       const zh = req.system.includes("Write in 简体中文");
       return { summary: zh ? `今天存入了${input.total + 1}条。` : `You saved ${input.total + 1} items today.`, worth: [], question: zh ? "明天做什么？" : "What next?" };
@@ -729,7 +731,23 @@ describe("P5 review: the sentence the core writes when a digest's number will no
   }
 
   // Each case is its own test: one database and one clock serve a whole test, and a digest is written once a day.
-  const CASES: { name: string; texts: string[]; account: "en" | "zh"; mine?: boolean; prompt: string; sentence: string }[] = [
+  // What the day's analyses say decides the language, not what was saved: these summaries are too short to tell, or kana / Hangul (neither English nor Chinese).
+  const TOO_SHORT = () => ({ summary: "好的", key_fact: "好", points: ["好的"], verdict: "good_to_know" });
+  const KANA_OR_HANGUL = (input: any) => {
+    const hangul = /[가-힣]/.test(input.content);
+    const text = hangul ? HANGUL : KANA;
+    return { summary: text, key_fact: hangul ? "메모" : "メモ", points: [text], verdict: "good_to_know" };
+  };
+  const CASES: {
+    name: string;
+    texts: string[];
+    account: "en" | "zh";
+    mine?: boolean;
+    analysis?: (input: any) => unknown;
+    secondAskUnusable?: boolean;
+    prompt: string;
+    sentence: string;
+  }[] = [
     {
       name: "switch off, most of the day in Chinese, an English account: Chinese was asked for, so the core's sentence is Chinese",
       texts: [ZH_TEXT, ZH_TEXT_2, EN_TEXT],
@@ -774,10 +792,58 @@ describe("P5 review: the sentence the core writes when a digest's number will no
       prompt: "Write in 简体中文, whatever language the analyses are in: translate what you report",
       sentence: "这份每日摘要汇总了 2 条解读。",
     },
+    {
+      name: "switch off, the day's analyses are too short to tell, an English account: the account's language (English), whatever the saved texts are in",
+      texts: [ZH_TEXT, EN_TEXT, EN_TEXT_2],
+      account: "en",
+      analysis: TOO_SHORT,
+      prompt: "Write in English, whatever language the analyses are in: translate what you report",
+      sentence: "This daily digest covers 3 analyses.",
+    },
+    {
+      name: "switch off, the day's analyses are too short to tell, a Chinese account: the account's language (Chinese), whatever the saved texts are in",
+      texts: [EN_TEXT, EN_TEXT_2, ZH_TEXT],
+      account: "zh",
+      analysis: TOO_SHORT,
+      prompt: "Write in 简体中文, whatever language the analyses are in: translate what you report",
+      sentence: "这份每日摘要汇总了 3 条解读。",
+    },
+    {
+      name: "switch off, the day's analyses are in kana and Hangul (cannot be told), an English account: the account's language (English)",
+      texts: [KANA, HANGUL],
+      account: "en",
+      analysis: KANA_OR_HANGUL,
+      prompt: "Write in English, whatever language the analyses are in: translate what you report",
+      sentence: "This daily digest covers 2 analyses.",
+    },
+    {
+      name: "switch off, the day's analyses are in kana and Hangul (cannot be told), a Chinese account: the account's language (Chinese)",
+      texts: [KANA, HANGUL],
+      account: "zh",
+      analysis: KANA_OR_HANGUL,
+      prompt: "Write in 简体中文, whatever language the analyses are in: translate what you report",
+      sentence: "这份每日摘要汇总了 2 条解读。",
+    },
+    {
+      name: "the second ask gets no usable answer, most of the day in Chinese, an English account: the sentence is Chinese, as the asks were",
+      texts: [ZH_TEXT, ZH_TEXT_2, EN_TEXT],
+      account: "en",
+      secondAskUnusable: true,
+      prompt: "Write in 简体中文 (most of the analyses are in it)",
+      sentence: "这份每日摘要汇总了 3 条解读。",
+    },
+    {
+      name: "the second ask gets no usable answer, most of the day in English, a Chinese account: the sentence is English, as the asks were",
+      texts: [EN_TEXT, EN_TEXT_2, ZH_TEXT],
+      account: "zh",
+      secondAskUnusable: true,
+      prompt: "Write in the language the item's own text is written in (most of the analyses are in it)",
+      sentence: "This daily digest covers 3 analyses.",
+    },
   ];
   for (const c of CASES) {
     it(c.name, async () => {
-      const { asked, digest } = await fallbackDigest(c.texts, { account: c.account, mine: c.mine });
+      const { asked, digest } = await fallbackDigest(c.texts, { account: c.account, mine: c.mine, analysis: c.analysis, secondAskUnusable: c.secondAskUnusable });
       // Two asks, both wrong: the sentence is the core's own, and it is in the language of the last prompt.
       expect(asked).toHaveLength(2);
       for (const a of asked) expect(a.request.system).toContain(c.prompt);

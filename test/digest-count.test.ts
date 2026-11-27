@@ -11,13 +11,13 @@ const contentOf = (c: any) => JSON.parse(typeof c.request.messages[0].content ==
 const SKIPPABLE = { verdict: "skippable" };
 
 /** A day with `n` analysed items and no worth rows (the helper marks them skippable), and the clock at 21:20. */
-async function dayOf(n: number, lang?: string, steps = ["analysis"]) {
+async function dayOf(n: number, lang?: string, steps = ["analysis"], extra: Record<string, unknown> = SKIPPABLE) {
   const off = makeEnv();
   const { ann, helper } = await withHelper(off, steps);
   if (lang) await call(off, "PATCH", "/v1/settings", { token: ann.token, body: { lang } });
   const ids: string[] = [];
   for (let i = 0; i < n; i += 8) {
-    ids.push(...(await analysed(off, ann, helper, Array.from({ length: Math.min(8, n - i) }, (_, k) => `Thought number ${i + k + 1} about tea and brewing.`), SKIPPABLE)));
+    ids.push(...(await analysed(off, ann, helper, Array.from({ length: Math.min(8, n - i) }, (_, k) => `Thought number ${i + k + 1} about tea and brewing.`), extra)));
   }
   advance(9 * HOUR_MS);
   await refresh(off, helper); // the helper's credential lasts an hour
@@ -115,6 +115,40 @@ describe("core#3: the built-in assistant's digest agrees with its snapshot", () 
     expect(d.summary).toBe("You saved 17 things today.");
     expect(d.counts.saved).toBe(17);
   });
+
+  // The core's own sentence is in the language of the day's LAST snapshot (the one the last ask was written for), not the first one's,
+  // and not always the account's. The model states the wrong number both times, so the sentence is the core's.
+  const EN_SUMMARY = "A short note on brewing tea."; // the helpers' default
+  const ZH_SUMMARY = "关于泡茶的一条简短笔记。";
+  for (const c of [
+    { name: "English account, 2 English analyses, 3 Chinese ones land while the model writes: Chinese is the majority by the last ask", lang: "en", start: EN_SUMMARY, landing: ZH_SUMMARY, landed: 3, prompts: ["the language the item's own text is written in (most", "简体中文 (most"], sentence: "这份每日摘要汇总了 5 条解读。" },
+    { name: "Chinese account, 2 Chinese analyses, 3 English ones land while the model writes: English is the majority by the last ask", lang: "zh", start: ZH_SUMMARY, landing: EN_SUMMARY, landed: 3, prompts: ["简体中文 (most", "the language the item's own text is written in (most"], sentence: "This daily digest covers 5 analyses." },
+    { name: "English account, 2 Chinese analyses, 2 English ones land while the model writes: an even split by the last ask, the account's language", lang: "en", start: ZH_SUMMARY, landing: EN_SUMMARY, landed: 2, prompts: ["简体中文 (most", "English, whatever language the analyses are in"], sentence: "This daily digest covers 4 analyses." },
+  ] as const) {
+    it(`the sentence follows the last snapshot's language: ${c.name}`, async () => {
+      const { off, ann, helper } = await dayOf(2, c.lang, ["analysis"], { ...SKIPPABLE, summary: c.start });
+      const calls: any[] = [];
+      const model = builtinModel(calls, { digest: (input) => ({ summary: `You saved ${input.total + 1} items today.`, worth: [], question: "What next?" }) });
+      let late = false;
+      const outbound: Outbound = async (url, init) => {
+        if (!late && String(init?.body).includes("You write the owner's daily digest")) {
+          late = true;
+          await analysed(off, ann, helper, Array.from({ length: c.landed }, (_, k) => `A thought that came in while the digest was being written, number ${k + 1}.`), { ...SKIPPABLE, summary: c.landing });
+        }
+        return model(url, init);
+      };
+      const env = makeEnv({ ...LLM, OUTBOUND: outbound });
+      await runMinute(env);
+      const asked = calls.filter(isDigest);
+      expect(asked).toHaveLength(2);
+      expect(contentOf(asked[0]).total).toBe(2);
+      expect(contentOf(asked[1]).total).toBe(2 + c.landed);
+      // Each ask was written for the snapshot it was given: the first for the day as it began, the second for the day as it had become.
+      expect(asked[0].request.system).toContain(c.prompts[0]);
+      expect(asked[1].request.system).toContain(c.prompts[1]);
+      expect((await digestOf(env, ann.token)).summary).toBe(c.sentence);
+    });
+  }
 
   it("a model whose second answer is unusable still leaves an honest digest: the snapshot's sentence and the first answer's question", async () => {
     const { ann } = await dayOf(16);
