@@ -8,6 +8,7 @@ import { LIMITS, num, type Env } from "./env";
 import { purgeItemStatements } from "./handlers/items";
 import { cleanAssets, deleteIfUnreferenced, refStatement } from "./services/assets";
 import { loadFetchSettings } from "./services/fetchers";
+import { sendInviteMails } from "./services/invitemail";
 import { fetchItemContent, WAITING_STATES } from "./services/items";
 import { leaveQueueStatements } from "./services/notes";
 import { sendDueNotifications } from "./services/notify";
@@ -146,6 +147,7 @@ export async function runMinute(env: Env): Promise<void> {
   await step("triage-defaults", () => triageDefaults(env));
   await runBuiltIns(env, origin);
   await step("notify", () => sendDueNotifications(env));
+  await step("invite-mail", () => sendInviteMails(env));
   await step("feedback", () => forwardPending(env));
   await step("record", () => recordRun(env, CRON_KEYS.minute));
 }

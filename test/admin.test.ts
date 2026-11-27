@@ -93,8 +93,9 @@ describe("admin invitations", () => {
     expect(list.status).toBe(200);
     expect(list.json).toEqual({
       invites: [
-        { email: "bob@example.com", invited_at: "2026-11-24T04:01:00.000Z", joined_at: null, user_id: null },
-        { email: "ann@example.com", invited_at: "2026-11-24T04:00:00.000Z", joined_at: "2026-11-24T04:00:00.000Z", user_id: ann.userId },
+        // No mail service in this environment: the notice mail is "not sent" (#106), and no language was given.
+        { email: "bob@example.com", invited_at: "2026-11-24T04:01:00.000Z", joined_at: null, user_id: null, lang: null, mail: { state: "not_sent", at: "2026-11-24T04:01:00.000Z", reason: "no_mail_service" } },
+        { email: "ann@example.com", invited_at: "2026-11-24T04:00:00.000Z", joined_at: "2026-11-24T04:00:00.000Z", user_id: ann.userId, lang: null, mail: { state: "not_sent", at: "2026-11-24T04:00:00.000Z", reason: "no_mail_service" } },
       ],
     });
   });

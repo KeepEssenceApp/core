@@ -1,13 +1,15 @@
 // Meta and sign-in by email code. The operator's side (invitations, hand-out codes) is in handlers/admin.ts.
 import { CONTRACT } from "../generated/contract";
 import { MINUTE, now } from "../clock";
-import { LIMITS, num, outbound, type Env } from "../env";
+import { LIMITS, num, type Env } from "../env";
 import { err, type Lang } from "../errors";
 import { validTimezone } from "../time";
 import { ok, type Handler } from "../types";
 import { safeEqual, sha256Hex } from "../util";
 import { createDevice, createUser, deviceView, userView } from "../services/accounts";
 import { ipKey, rateLimit } from "../services/guard";
+import { mailConfigured, safeWhy, sendMail } from "../services/mail";
+import { mailContext, renderSigninMail } from "../services/mailcopy";
 import type { UserRow } from "../types";
 
 export const getMeta: Handler = async () =>
@@ -54,50 +56,28 @@ export async function mintLoginCode(env: Env, email: string, lang: Lang | null =
   return { code, expiresAt };
 }
 
-const MAIL_TEXT: Record<Lang, (code: string, minutes: number) => { subject: string; text: string }> = {
-  zh: (code, minutes) => ({ subject: `登录验证码 ${code}`, text: `你的登录验证码是 ${code}，${minutes} 分钟内有效，只能用一次。\n如果不是你本人在登录，忽略这封邮件即可。` }),
-  en: (code, minutes) => ({ subject: `Sign-in code ${code}`, text: `Your sign-in code is ${code}. It is valid for ${minutes} minutes and can be used once.\nIf you did not try to sign in, ignore this email.` }),
-};
-
-/** True when sign-in codes can be emailed: a sender address plus either the platform's mail binding or a Resend key. */
-export function mailConfigured(env: Env): boolean {
-  return Boolean(env.EMAIL_FROM && (env.EMAIL || env.RESEND_API_KEY));
-}
-
-/** Remembers how the last sign-in mail went, for the operator's overview. */
+/** Remembers how the last sign-in mail went, for the operator's overview. The text never holds an address or a number that could be a code. */
 async function noteMail(env: Env, result: string): Promise<void> {
   await env.DB.prepare("INSERT INTO core_state (key, value, updated_at) VALUES ('mail.last', ?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?2")
-    .bind(result.replace(/[^\s@]+@[^\s@]+/g, "<address>").slice(0, 200), now())
+    .bind(safeWhy(result), now())
     .run()
     .catch(() => {});
 }
 
 async function mailCode(env: Env, email: string, code: string, lang: Lang): Promise<void> {
   if (!mailConfigured(env)) return; // no mail provider: the operator hands the code out
-  const { subject, text } = MAIL_TEXT[lang](code, LIMITS.login_code_minutes);
-  try {
-    // A Resend key, when set, comes first: the platform's own binding reaches only verified
-    // addresses unless the sending domain is onboarded on a paid plan.
-    if (env.EMAIL && !env.RESEND_API_KEY) {
-      await env.EMAIL.send({ to: email, from: env.EMAIL_FROM!, subject, text });
-      await noteMail(env, "sent");
-      return;
-    }
-    const response = await outbound(env, "https://api.resend.com/emails", {
-      method: "POST",
-      headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, "content-type": "application/json" },
-      body: JSON.stringify({ from: env.EMAIL_FROM, to: [email], subject, text }),
-    });
-    if (!response.ok) console.warn(`sign-in mail refused: ${response.status}`);
-    const refusal = response.ok ? "" : (await response.clone().text().catch(() => "")).slice(0, 120);
-    await noteMail(env, response.ok ? "sent" : `refused: ${response.status} ${refusal}`);
-    await response.body?.cancel().catch(() => {});
-  } catch (e) {
-    // The answer is 202 either way; the user can ask again. Say why in the log, never the code or the address.
-    const why = e instanceof Error ? e.message.replace(/[^\s@]+@[^\s@]+/g, "<address>") : "unknown";
-    console.warn("sign-in mail failed", why);
-    await noteMail(env, `failed: ${why}`);
+  // The code is in the body only (spec product/mail.md): not in the subject, which shows on lock screens and in mail lists.
+  const mail = renderSigninMail(lang, code, LIMITS.login_code_minutes, mailContext(env));
+  const result = await sendMail(env, { to: email, ...mail });
+  if (result.outcome === "accepted") {
+    await noteMail(env, "sent");
+    return;
   }
+  // The answer is 202 either way; the user can ask again. Say why in the log, never the code or the address.
+  // (The overview has always said "failed" for a call that threw; that wording stays.)
+  const label = result.outcome === "refused" ? "refused" : "failed";
+  console.warn(`sign-in mail ${label}`, result.why);
+  await noteMail(env, `${label}: ${result.why}`);
 }
 
 export const requestLoginCode: Handler = async (cx) => {

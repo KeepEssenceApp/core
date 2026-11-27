@@ -47,18 +47,49 @@ them). `cron` is when each job last finished (`null`: never since this was deplo
 `LLM_MODEL`, else the defaults, and `LLM_EFFORT_TRIAGE` / `LLM_EFFORT_WORKER`). `model` is one string for what read it
 before: the model's name when both jobs use the same one, otherwise both named
 (`claude-haiku-5-5 (triage), claude-sonnet-5-5 (analysis, digest)`). `model_configured` is true when `LLM_API_KEY` is set,
-`mail_configured` when both `RESEND_API_KEY` and `EMAIL_FROM` are, `push_configured` when both
+`mail_configured` when `EMAIL_FROM` is set and so is either the platform's `EMAIL` binding or
+`RESEND_API_KEY`, `push_configured` when both
 VAPID keys are. `version` is the variable `CORE_VERSION` when it is set, otherwise the version in
 `package.json`. No secret is ever returned.
 
 ## Invitations
 
-- `GET /admin/invites` → `{ "invites": [{ "email", "invited_at", "joined_at": null, "user_id": null }] }`,
-  newest first. `joined_at` / `user_id` are set once an account exists for that email.
+- `GET /admin/invites` →
+  `{ "invites": [{ "email", "invited_at", "joined_at": null, "user_id": null, "lang": null, "mail": null }] }`,
+  newest first. `joined_at` / `user_id` are set once an account exists for that email. `lang` is the
+  language given when it was invited (`"zh"`, `"en"`, or `null`). `mail` is the invitation notice
+  ([spec product/mail.md](https://github.com/KeepEssenceApp/spec/blob/main/product/mail.md)):
+  `{ "state": "queued" | "sending" | "accepted" | "failed" | "not_sent", "at": "…", "reason": null }`, or
+  `null` for an invitation from before the notice mail existed (none was sent, none will be).
+  `accepted` is the mail service taking the mail, **not** delivery. `reason` is a fixed machine value,
+  never text from a provider and never an address or a code:
+
+  | `state` | `reason` | When | What a portal should say |
+  |---|---|---|---|
+  | `failed` | `refused` | the mail service answered no (a 4xx) | failed: the service refused; fix the setting, then withdraw and invite again |
+  | `failed` | `error` | it broke before the request was handed to the service (template, setting, local) | failed: nothing was sent; same advice |
+  | `failed` | `unconfirmed` | the request was handed over and there was no clear answer: a timeout, a cut connection, a 5xx, the answer could not be written, or `sending` for over 15 minutes | **result unknown: it may have gone out**; no "invite again" advice, and say that inviting again may give the person a second mail |
+  | `not_sent` | `no_mail_service` | there was no mail service when the invitation was made, or when it came to sending | not sent; the operator hands out a sign-in code instead |
+
+  Anything that cannot be told apart is `unconfirmed`. Nothing is ever resent automatically, and there is
+  no resend route.
 - `POST /admin/invites` with `{ "email": "…" }` or `{ "emails": ["…"] }` → 201
   `{ "added": ["…"], "already": ["…"], "invalid": ["…"] }`. Emails are trimmed and lower-cased.
   At most 1000 at a time. 400 only when the body names no address at all. With the single form
   and a valid address the answer also carries `"email"`, as it did before the lists were added.
+  Optional, for the notice mail's language: `"lang": "zh" | "en"` for every address in the request
+  and `"langs": { "<email>": "zh" | "en" }` per address (it wins); anything else is ignored and the
+  address gets the core's default, English. Only an address that is **added** gets a mail: it is
+  given its own invitation id and recorded as `queued` (or `not_sent` when no mail service is
+  configured, final), and the minute Cron sends the queue a few at a time. The core makes one
+  request to the mail service per invitation and never repeats it: the claim (`queued` to `sending`)
+  is one conditional write, and every result is written by invitation id and only while it is still
+  `sending`, so a late result of an old invitation can land on that one or on nothing, never on a new
+  one. An address that is `already` invited is not touched. Removing an invitation and inviting again
+  is a new invitation with a new id. The invitation id is also sent as Resend's `Idempotency-Key`;
+  that can only reduce duplicates at the service, it does not make a promise about what the service does.
+  One send call is given 30 seconds (`SEND_TIMEOUT_MS`) for the whole exchange, the answer's body included (an error body is read for the log only, at most 512 bytes of it); the 15 minutes after which `sending` becomes
+  `unconfirmed` (`SENDING_UNCONFIRMED_AFTER`) must stay far above it.
 - `DELETE /admin/invites` with `{ "email": "…" }` → 204. Does not touch an existing account.
 - `POST /admin/login-codes` with `{ "email": "…" }` → 201 `{ "email": "…", "code": "123456", "expires_at": "…" }`;
   404 `not_invited` when the email is not on the list; 409 when the account is suspended.

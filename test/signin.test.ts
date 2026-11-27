@@ -34,7 +34,10 @@ describe("K1 sign-in", () => {
     expect(sent[0].url).toBe("https://api.resend.com/emails");
     expect(sent[0].auth).toBe("Bearer re_test");
     expect(sent[0].body.to).toEqual(["ann@example.com"]);
-    const code = sent[0].body.subject.match(/\d{6}/)[0];
+    // The code is in the body, never in the subject (#106: the subject shows on lock screens and in mail lists).
+    expect(sent[0].body.subject).not.toMatch(/\d{6}/);
+    const code = sent[0].body.text.match(/\b\d{6}\b/)[0];
+    expect(sent[0].body.html).toContain(code);
     const r = await call(mail, "POST", "/v1/auth/sessions", session("ann@example.com", code));
     expect(r.status).toBe(201);
   });
