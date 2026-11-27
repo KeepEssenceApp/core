@@ -70,8 +70,11 @@ describe("core#3: the built-in assistant's digest agrees with its snapshot", () 
     expect(usage).toMatchObject({ calls: 2 });
   });
 
-  it("in Chinese the fallback is in Chinese", async () => {
-    const { ann } = await dayOf(16, "zh");
+  // The fallback is in the language the digest was to be written in (P5): a Chinese account whose day is in English gets English
+  // (see analysis-language.test.ts), so this one has the switch "always use my language" on, which makes the account's language the target.
+  it("in Chinese the fallback is in Chinese (a Chinese account with the switch on)", async () => {
+    const { off, ann } = await dayOf(16, "zh");
+    expect((await call(off, "PATCH", "/v1/settings", { token: ann.token, body: { always_my_language: true } })).status).toBe(200);
     const calls: any[] = [];
     const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { digest: () => ({ summary: "今天存入了十五条。", worth: [], question: "明天想泡什么茶？" }) }) });
     await runMinute(env);

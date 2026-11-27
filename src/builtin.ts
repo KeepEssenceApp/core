@@ -510,8 +510,9 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
       return false;
     }
     // Still not in agreement after the second ask (or the second ask failed): the summary is the snapshot's own sentence, never the model's number.
+    // It is in the language the digest was to be written in (the same target as the prompt: the day's majority, or the account's), not always the account's.
     if (summary === undefined) {
-      summary = fallbackSummary(ctx.analyses.length, user.lang);
+      summary = fallbackSummary(ctx.analyses.length, targetOf(ctx).check);
       question = first.question;
       worthRaw = first.worth;
     }

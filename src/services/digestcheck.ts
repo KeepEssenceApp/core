@@ -155,7 +155,8 @@ export function wrongTotal(summary: string, total: number): number | null {
 
 /**
  * What the built-in assistant writes itself when the model's summary will not agree with the snapshot: a
- * plain sentence from the snapshot's own number, in the account's language. Nothing is invented.
+ * plain sentence from the snapshot's own number, in the language the digest was to be written in (the caller's
+ * `digestTarget(...).check`: the day's majority, or the account's). Nothing is invented.
  */
 export function fallbackSummary(total: number, lang: "zh" | "en"): string {
   return lang === "zh" ? `这份每日摘要汇总了 ${total} 条解读。` : `This daily digest covers ${total} ${total === 1 ? "analysis" : "analyses"}.`;

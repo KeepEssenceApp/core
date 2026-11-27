@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { analysisTarget, digestTarget, scriptOf, writtenIn, wrongLanguageFields } from "../src/builtin";
 import { advance, MINUTE } from "../src/clock";
 import { runMinute } from "../src/cron";
-import { builtinModel, call, db, LLM, makeEnv, saveText, signIn, signInMine, tool, withHelper, type Outbound } from "./helpers";
+import { builtinModel, call, db, LLM, makeEnv, modelStub, saveText, signIn, signInMine, tool, withHelper, type Outbound } from "./helpers";
 
 const ZH_TEXT = "中文测试笔记：明天上午十点和产品团队开会，讨论新版本的发布计划，请提前准备演示文稿。";
 const EN_TEXT = "Cedar team note: the release plan is due on Friday, and the slides need one more pass before the review.";
@@ -696,6 +696,100 @@ describe("P5: the daily digest follows the day's analyses by default", () => {
   it("with the switch on it is the account's language, whatever the day's analyses are in", async () => {
     const system = await digestSystem([ZH_TEXT, ZH_TEXT_2], { mine: true });
     expect(system).toContain("Write in English, whatever language the analyses are in: translate what you report");
+  });
+});
+
+describe("P5 review: the sentence the core writes when a digest's number will not agree is in the digest's language too", () => {
+  /**
+   * Saves the texts, lets them be analysed (each in its own language), and writes the digest at 21:05 with a model that
+   * states the wrong number every time (in the language it was told to write in), so that the second ask fails and the
+   * core writes the sentence itself. Returns what was stored and how often the model was asked.
+   */
+  async function fallbackDigest(texts: string[], opts: { account: "en" | "zh"; mine?: boolean }) {
+    const calls: any[] = [];
+    const model = modelStub((req) => {
+      const content = req.messages[0].content;
+      const input = JSON.parse(typeof content === "string" ? content : content.find((b: any) => b.type === "text").text);
+      if (req.system.startsWith("You sort")) return input.items.map((i: any) => ({ item_id: i.item_id }));
+      if (req.system.startsWith("You analyse")) return byItem(input);
+      // The digest: one more than the snapshot has, in the language the system prompt asks for (Chinese when it says 简体中文).
+      const zh = req.system.includes("Write in 简体中文");
+      return { summary: zh ? `今天存入了${input.total + 1}条。` : `You saved ${input.total + 1} items today.`, worth: [], question: zh ? "明天做什么？" : "What next?" };
+    }, calls);
+    const env = makeEnv({ ...LLM, TRIAGE_BATCH: "10", ANALYSIS_BATCH: "10", OUTBOUND: model });
+    const ann = await (opts.mine ? signInMine : signIn)(env, "ann@example.com", opts.account);
+    for (const t of texts) await saveText(env, ann.token, t);
+    await runMinute(env);
+    expect((await db(env, "SELECT COUNT(*) AS n FROM analyses"))[0].n).toBe(texts.length);
+    advance(9 * 60 * MINUTE + 5 * MINUTE); // 21:05 in the account's time zone
+    await runMinute(env);
+    const asked = calls.filter((c) => c.request.system.startsWith("You write"));
+    const digest = (await call(env, "GET", "/v1/digests/latest", { token: ann.token })).json;
+    return { asked, digest };
+  }
+
+  // Each case is its own test: one database and one clock serve a whole test, and a digest is written once a day.
+  const CASES: { name: string; texts: string[]; account: "en" | "zh"; mine?: boolean; prompt: string; sentence: string }[] = [
+    {
+      name: "switch off, most of the day in Chinese, an English account: Chinese was asked for, so the core's sentence is Chinese",
+      texts: [ZH_TEXT, ZH_TEXT_2, EN_TEXT],
+      account: "en",
+      prompt: "Write in 简体中文 (most of the analyses are in it)",
+      sentence: "这份每日摘要汇总了 3 条解读。",
+    },
+    {
+      name: "switch off, most of the day in English, a Chinese account: the item's language was asked for, so the core's sentence is English",
+      texts: [EN_TEXT, EN_TEXT_2, ZH_TEXT],
+      account: "zh",
+      prompt: "Write in the language the item's own text is written in (most of the analyses are in it)",
+      sentence: "This daily digest covers 3 analyses.",
+    },
+    {
+      name: "switch off, an even split, an English account: the account's language",
+      texts: [ZH_TEXT, EN_TEXT],
+      account: "en",
+      prompt: "Write in English, whatever language the analyses are in: translate what you report",
+      sentence: "This daily digest covers 2 analyses.",
+    },
+    {
+      name: "switch off, an even split, a Chinese account: the account's language",
+      texts: [ZH_TEXT, EN_TEXT],
+      account: "zh",
+      prompt: "Write in 简体中文, whatever language the analyses are in: translate what you report",
+      sentence: "这份每日摘要汇总了 2 条解读。",
+    },
+    {
+      name: "switch on, most of the day in Chinese, an English account: the account's language (English)",
+      texts: [ZH_TEXT, ZH_TEXT_2],
+      account: "en",
+      mine: true,
+      prompt: "Write in English, whatever language the analyses are in: translate what you report",
+      sentence: "This daily digest covers 2 analyses.",
+    },
+    {
+      name: "switch on, most of the day in English, a Chinese account: the account's language (Chinese)",
+      texts: [EN_TEXT, EN_TEXT_2],
+      account: "zh",
+      mine: true,
+      prompt: "Write in 简体中文, whatever language the analyses are in: translate what you report",
+      sentence: "这份每日摘要汇总了 2 条解读。",
+    },
+  ];
+  for (const c of CASES) {
+    it(c.name, async () => {
+      const { asked, digest } = await fallbackDigest(c.texts, { account: c.account, mine: c.mine });
+      // Two asks, both wrong: the sentence is the core's own, and it is in the language of the last prompt.
+      expect(asked).toHaveLength(2);
+      for (const a of asked) expect(a.request.system).toContain(c.prompt);
+      expect(digest.summary).toBe(c.sentence);
+      expect(digest.counts.saved).toBe(c.texts.length);
+    });
+  }
+
+  it("the model's own question is kept, and nothing else of its summary", async () => {
+    const { digest } = await fallbackDigest([ZH_TEXT, ZH_TEXT_2, EN_TEXT], { account: "en" });
+    expect(digest.question).toBe("明天做什么？");
+    expect(digest.summary).not.toMatch(/4/);
   });
 });
 
