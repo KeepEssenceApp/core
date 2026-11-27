@@ -30,12 +30,43 @@ export function modelConfigured(env: Env): boolean {
   return Boolean(env.LLM_API_KEY);
 }
 
-export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply | null> {
-  const fail = (reason: string) => {
-    req.onFailure?.(reason);
-    return null;
+/** What a call to the model cost, as the model said it. Only ever what the model said: nothing is made up for a call that got no answer. */
+export interface ModelCost {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * The two things a call can come to, kept apart: `reply`, whether the answer can be used (it has text and is not a refusal),
+ * and `cost`, whether the model answered at all and so was paid. An answer that carries its usage but no usable text (an empty
+ * one, a refusal) has a cost and no reply. A call that got no answer (no credential, an error status, a timeout, a body that is
+ * not an answer) has neither: `failure` says why.
+ */
+export interface ModelAnswer {
+  reply: ModelReply | null;
+  cost: ModelCost | null;
+  failure?: string;
+}
+
+/** The tokens an answer says it used, or null when it says none (an error body, a gateway's own message). Cached parts count as input. */
+function usageOf(data: any, model: string): ModelCost | null {
+  const u = data?.usage;
+  if (!u || typeof u !== "object") return null;
+  // As before: a gateway may write a count as a string. Absent, or not a count, is "says nothing".
+  const n = (v: unknown) => (v === undefined || v === null || v === "" || !Number.isFinite(Number(v)) || Number(v) < 0 ? null : Number(v));
+  const parts = [n(u.input_tokens), n(u.output_tokens), n(u.cache_creation_input_tokens), n(u.cache_read_input_tokens)];
+  if (parts.every((p) => p === null)) return null;
+  return {
+    model: typeof data.model === "string" ? data.model : model,
+    inputTokens: (parts[0] ?? 0) + (parts[2] ?? 0) + (parts[3] ?? 0),
+    outputTokens: parts[1] ?? 0,
   };
-  if (!env.LLM_API_KEY) return fail("no credential");
+}
+
+export async function askModel(env: Env, req: ModelRequest): Promise<ModelAnswer> {
+  const none = (failure: string): ModelAnswer => ({ reply: null, cost: null, failure });
+  if (!env.LLM_API_KEY) return none("no credential");
   const base = (env.LLM_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
   const model = env.LLM_MODEL || DEFAULT_MODEL;
   const abort = new AbortController();
@@ -69,31 +100,32 @@ export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       const what = response.status === 401 || response.status === 403 ? "credential refused" : "model answered";
-      return fail(`${what} ${response.status}`);
+      return none(`${what} ${response.status}`);
     }
     const data = (await response.json()) as any;
-    if (data?.stop_reason === "refusal") return fail("model refused");
-    if (!Array.isArray(data?.content)) return fail("reply has no content");
+    // The model answered: what it says it used is on record whatever came of the text.
+    const cost = usageOf(data, model);
+    if (data?.stop_reason === "refusal") return { reply: null, cost, failure: "model refused" };
+    if (!Array.isArray(data?.content)) return { reply: null, cost, failure: "reply has no content" };
     const text = data.content
       .filter((b: any) => b?.type === "text" && typeof b.text === "string")
       .map((b: any) => b.text)
       .join("");
-    if (!text.trim()) return fail("reply is empty");
-    return {
-      text,
-      model: typeof data.model === "string" ? data.model : model,
-      // Gateways that cache prompts report the cached part separately; count all of it as input.
-      inputTokens:
-        (Number(data.usage?.input_tokens) || 0) +
-        (Number(data.usage?.cache_creation_input_tokens) || 0) +
-        (Number(data.usage?.cache_read_input_tokens) || 0),
-      outputTokens: Number(data.usage?.output_tokens) || 0,
-    };
+    if (!text.trim()) return { reply: null, cost, failure: "reply is empty" };
+    const used = cost ?? { model: typeof data.model === "string" ? data.model : model, inputTokens: 0, outputTokens: 0 };
+    return { reply: { text, model: used.model, inputTokens: used.inputTokens, outputTokens: used.outputTokens }, cost: used };
   } catch (e) {
-    return fail(abort.signal.aborted ? `no reply within ${req.timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
+    return none(abort.signal.aborted ? `no reply within ${req.timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The usable reply, or null (the caller then leaves the work for later). For the jobs that do not account for an answer they cannot use. */
+export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply | null> {
+  const answer = await askModel(env, req);
+  if (!answer.reply) req.onFailure?.(answer.failure ?? "no reply");
+  return answer.reply;
 }
 
 /** Finds the JSON value in a model reply: tolerates code fences and words around it. */

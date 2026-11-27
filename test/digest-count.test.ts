@@ -283,6 +283,94 @@ describe("core#3 (QA's review of 6f28c34): the model is paid for two answers per
     expect(total(await spent(env))).toBe(1);
   });
 
+  // QA's review of 3e751d1 / 316e20d: an answer that carries its usage but has no usable text was paid for too.
+  const ANOMALIES: [string, () => Response][] = [
+    ["an empty answer", () => Response.json({ type: "message", content: [], stop_reason: "end_turn", usage: { input_tokens: 120, output_tokens: 40 } })],
+    ["a refusal", () => Response.json({ type: "message", stop_reason: "refusal", content: [{ type: "text", text: "declined" }], usage: { input_tokens: 120, output_tokens: 40 } })],
+  ];
+  /** The digest request answered by `odd` for the asks in `which` (1-based), and by the usual stand-in otherwise. */
+  const odd = (calls: any[], which: number[], answer: (n: number) => Response, good: Parameters<typeof builtinModel>[1]): { out: Outbound; asked: () => number } => {
+    const usual = builtinModel(calls, good);
+    let asked = 0;
+    return {
+      asked: () => asked,
+      out: async (url, init) => {
+        if (String(init?.body).includes("You write the owner's daily digest")) {
+          asked++;
+          if (which.includes(asked)) return answer(asked);
+        }
+        return usual(url, init);
+      },
+    };
+  };
+
+  for (const [what, answer] of ANOMALIES) {
+    it(`${what} that carries its usage on every Cron run: two answers in all, both on record at 240/80, and no digest is made up`, async () => {
+      const { ann } = await dayOf(16);
+      const model = odd([], [1, 2, 3, 4, 5, 6], answer, {});
+      const env = makeEnv({ ...LLM, OUTBOUND: model.out });
+      for (let n = 0; n < 5; n++) {
+        await runMinute(env);
+        advance(60_000);
+      }
+      expect(model.asked()).toBe(2);
+      const rows = await spent(env);
+      expect(total(rows)).toBe(2);
+      expect(rows.reduce((n, r) => n + r.input_tokens, 0)).toBe(240);
+      expect(rows.reduce((n, r) => n + r.output_tokens, 0)).toBe(80);
+      expect(rows.every((r) => r.items === 0)).toBe(true);
+      expect(await written(env)).toEqual([]);
+      expect((await call(env, "GET", "/v1/digests/latest", { token: ann.token })).json.summary ?? null).toBeNull();
+      expect((await call(env, "GET", "/v1/usage", { token: ann.token })).json.assistants.find((u: any) => u.name === "Built-in assistant")).toMatchObject({ calls: 2 });
+    });
+
+    it(`${what} first and a good answer on the next run: written once, and the two answers are the two on record`, async () => {
+      const { ann } = await dayOf(16);
+      const model = odd([], [1], answer, { digest: () => ({ summary: "You saved 16 items today.", worth: [], question: "What would you brew tomorrow?" }) });
+      const env = makeEnv({ ...LLM, OUTBOUND: model.out });
+      await runMinute(env);
+      expect(await written(env)).toEqual([]);
+      expect(total(await spent(env))).toBe(1);
+      advance(60_000);
+      await runMinute(env);
+      expect(await digestOf(env, ann.token)).toMatchObject({ summary: "You saved 16 items today.", question: "What would you brew tomorrow?" });
+      expect(model.asked()).toBe(2);
+      const rows = await spent(env);
+      expect(total(rows)).toBe(2);
+      expect(rows.reduce((n, r) => n + r.input_tokens, 0)).toBe(240);
+    });
+
+    it(`a summary with the wrong number and then ${what} that carries its usage as the correction: the snapshot's own sentence, the first answer's question, and both answers on record`, async () => {
+      const { ann } = await dayOf(16);
+      const model = odd([], [2], answer, { digest: () => ({ summary: "You saved 15 items today. This digest covers 15 items.", worth: [], question: "What would you brew tomorrow?" }) });
+      const env = makeEnv({ ...LLM, OUTBOUND: model.out });
+      await runMinute(env);
+      advance(60_000);
+      await runMinute(env);
+      expect(model.asked()).toBe(2);
+      expect(await digestOf(env, ann.token)).toMatchObject({ summary: "This daily digest covers 16 analyses.", question: "What would you brew tomorrow?" });
+      const rows = await spent(env);
+      expect(total(rows)).toBe(2);
+      expect(rows.reduce((n, r) => n + r.input_tokens, 0)).toBe(240);
+      expect(rows.reduce((n, r) => n + r.output_tokens, 0)).toBe(80);
+      // The usage the user is shown is what was spent.
+      expect((await call(env, "GET", "/v1/usage", { token: ann.token })).json.assistants.find((u: any) => u.name === "Built-in assistant")).toMatchObject({ calls: 2 });
+    });
+  }
+
+  it("an empty answer that says nothing about its usage costs nothing on record: no cost is made up for it", async () => {
+    const { ann } = await dayOf(16);
+    const model = odd([], [1, 2, 3], () => Response.json({ type: "message", content: [] }), {});
+    const env = makeEnv({ ...LLM, OUTBOUND: model.out });
+    for (let n = 0; n < 3; n++) {
+      await runMinute(env);
+      advance(60_000);
+    }
+    expect(await spent(env)).toEqual([]);
+    expect(await written(env)).toEqual([]);
+    expect((await call(env, "GET", "/v1/usage", { token: ann.token })).json.assistants.find((u: any) => u.name === "Built-in assistant")?.calls ?? 0).toBe(0);
+  });
+
   it("the next day's digest has a budget of its own", async () => {
     const { ann } = await dayOf(16);
     const calls: any[] = [];
