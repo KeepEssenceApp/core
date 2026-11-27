@@ -11,9 +11,9 @@ const contentOf = (c: any) => JSON.parse(typeof c.request.messages[0].content ==
 const SKIPPABLE = { verdict: "skippable" };
 
 /** A day with `n` analysed items and no worth rows (the helper marks them skippable), and the clock at 21:20. */
-async function dayOf(n: number, lang?: string) {
+async function dayOf(n: number, lang?: string, steps = ["analysis"]) {
   const off = makeEnv();
-  const { ann, helper } = await withHelper(off, ["analysis"]);
+  const { ann, helper } = await withHelper(off, steps);
   if (lang) await call(off, "PATCH", "/v1/settings", { token: ann.token, body: { lang } });
   const ids: string[] = [];
   for (let i = 0; i < n; i += 8) {
@@ -201,4 +201,126 @@ describe("internal-qa #27: a summary that agrees with the digest is not refused 
     expect(right.json.outcomes[0].accepted).toBe(true);
     expect((await digestOf(off, ann.token)).summary).toBe("You saved 3 items today. Steep the tea for a total of 5 minutes.");
   });
+});
+
+describe("core#3 (QA's review of 6f28c34): the model is paid for two answers per digest in all, and every answer is on record", () => {
+  const spent = async (env: any) => (await db(env, "SELECT calls, input_tokens, output_tokens, items FROM usage_records WHERE kind = 'digest' ORDER BY created_at, id")) as { calls: number; input_tokens: number; output_tokens: number; items: number }[];
+  const total = (rows: { calls: number }[]) => rows.reduce((n, r) => n + r.calls, 0);
+  const written = async (env: any) => (await db(env, "SELECT status, summary, question FROM digests WHERE status = 'done'")) as { summary: string; question: string }[];
+
+  it("an answer that is not JSON on every Cron run: two answers in all, both on record, and no digest is made up", async () => {
+    const { ann } = await dayOf(16);
+    const calls: any[] = [];
+    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { digest: () => "not json" }) });
+    for (let n = 0; n < 4; n++) {
+      await runMinute(env);
+      advance(60_000);
+    }
+    expect(calls.filter(isDigest)).toHaveLength(2);
+    const rows = await spent(env);
+    expect(total(rows)).toBe(2);
+    expect(rows.reduce((n, r) => n + r.input_tokens, 0)).toBe(240);
+    expect(rows.reduce((n, r) => n + r.output_tokens, 0)).toBe(80);
+    expect(rows.every((r) => r.items === 0)).toBe(true);
+    // Honest: no digest, so no summary, no question, no list of worth items from nowhere.
+    expect(await written(env)).toEqual([]);
+    const latest = await call(env, "GET", "/v1/digests/latest", { token: ann.token });
+    expect(latest.json.summary ?? null).toBeNull();
+    // The usage the user is shown agrees with what was asked.
+    const usage = (await call(env, "GET", "/v1/usage", { token: ann.token })).json.assistants.find((u: any) => u.name === "Built-in assistant");
+    expect(usage).toMatchObject({ calls: 2 });
+  });
+
+  it("an unusable first answer and a good one on the next run: written once, and the two answers are the two on record", async () => {
+    const { ann } = await dayOf(16);
+    const calls: any[] = [];
+    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { digest: () => (calls.filter(isDigest).length === 1 ? "not json" : { summary: "You saved 16 items today.", worth: [], question: "What would you brew tomorrow?" }) }) });
+    await runMinute(env);
+    expect(await written(env)).toEqual([]);
+    advance(60_000);
+    await runMinute(env);
+    expect(calls.filter(isDigest)).toHaveLength(2);
+    expect(await digestOf(env, ann.token)).toMatchObject({ summary: "You saved 16 items today.", question: "What would you brew tomorrow?" });
+    expect(total(await spent(env))).toBe(2);
+    // One digest a day: nothing more is asked.
+    advance(60_000);
+    await runMinute(env);
+    expect(calls.filter(isDigest)).toHaveLength(2);
+  });
+
+  it("an unusable first answer, then a summary with the wrong number: there is no third answer to correct it, so the summary is the snapshot's own sentence", async () => {
+    const { ann } = await dayOf(16);
+    const calls: any[] = [];
+    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { digest: () => (calls.filter(isDigest).length === 1 ? "not json" : { summary: "You saved 15 items today.", worth: [], question: "What would you brew tomorrow?" }) }) });
+    await runMinute(env);
+    advance(60_000);
+    await runMinute(env);
+    advance(60_000);
+    await runMinute(env);
+    expect(calls.filter(isDigest)).toHaveLength(2);
+    expect(await digestOf(env, ann.token)).toMatchObject({ summary: "This daily digest covers 16 analyses.", question: "What would you brew tomorrow?" });
+    expect(total(await spent(env))).toBe(2);
+  });
+
+  it("a model that is down answers nothing, costs nothing, and does not use up the digest's two answers", async () => {
+    const { ann } = await dayOf(16);
+    const calls: any[] = [];
+    const good = builtinModel(calls, { digest: () => ({ summary: "You saved 16 items today.", worth: [], question: "What would you brew tomorrow?" }) });
+    let down = 3;
+    const env = makeEnv({
+      ...LLM,
+      OUTBOUND: async (url, init) => {
+        if (String(init?.body).includes("You write the owner's daily digest") && down-- > 0) return new Response("down", { status: 503 });
+        return good(url, init);
+      },
+    });
+    for (let n = 0; n < 4; n++) {
+      await runMinute(env);
+      advance(60_000);
+    }
+    expect(await digestOf(env, ann.token)).toMatchObject({ summary: "You saved 16 items today." });
+    expect(calls.filter(isDigest)).toHaveLength(1);
+    expect(total(await spent(env))).toBe(1);
+  });
+
+  it("the next day's digest has a budget of its own", async () => {
+    const { ann } = await dayOf(16);
+    const calls: any[] = [];
+    const bad = builtinModel(calls, { digest: () => "not json" });
+    const env = makeEnv({ ...LLM, OUTBOUND: bad });
+    for (let n = 0; n < 3; n++) {
+      await runMinute(env);
+      advance(60_000);
+    }
+    expect(calls.filter(isDigest)).toHaveLength(2);
+    // The next evening: the same items still wait, and the model is asked again, for the new day.
+    advance(24 * HOUR_MS);
+    await runMinute(env);
+    expect(calls.filter(isDigest)).toHaveLength(3);
+    expect(ann.token).toBeTruthy();
+  });
+});
+
+describe("internal-qa #27 (QA's review of a3c855e): another assistant's summary that says what this digest covers", () => {
+  it("a wrong number beside a clause about the set is invalid_result and stores nothing; the right number, in the same words, is accepted", async () => {
+    const { off, helper } = await dayOf(16, undefined, ["analysis", "digest"]);
+    const c = await claim(off, helper.access, "digest");
+    const day = c.work[0].ref;
+    for (const summary of ["This digest covers 15 items, which span tea and coffee.", "这份每日摘要汇总了15条关于茶的解读。"]) {
+      const wrong = await submit(off, helper.access, c.claim_id, [{ kind: "digest", day, summary, worth: [], question: "What next?" }]);
+      expect(`${summary} ${wrong.status} ${wrong.json?.error?.code}`).toBe(`${summary} 400 invalid_result`);
+    }
+    expect(await db(off, "SELECT COUNT(*) AS n FROM digests WHERE status = 'done'")).toEqual([{ n: 0 }]);
+    const right = await submit(off, helper.access, c.claim_id, [{ kind: "digest", day, summary: "This digest covers 16 items, which span tea and coffee.", worth: [], question: "What next?" }]);
+    expect(right.status).toBe(200);
+  });
+
+  for (const summary of ["You saved 16 items today. Steep the tea for a total of 5 minutes.", "今天存入了16条。其中共3条讲茶。", "今天存入了16条。茶叶合计50克。"]) {
+    it(`a summary QA found refused although it agrees is accepted: ${summary}`, async () => {
+      const { off, helper } = await dayOf(16, undefined, ["analysis", "digest"]);
+      const c = await claim(off, helper.access, "digest");
+      const r = await submit(off, helper.access, c.claim_id, [{ kind: "digest", day: c.work[0].ref, summary, worth: [], question: "What next?" }]);
+      expect(r.status).toBe(200);
+    });
+  }
 });

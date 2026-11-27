@@ -8,7 +8,7 @@ import { builtinActor, getUser } from "./services/accounts";
 import { callModel, extractJson, modelConfigured, type ContentBlock } from "./services/model";
 import { digestDue } from "./services/digests";
 import { fallbackSummary, wrongTotal } from "./services/digestcheck";
-import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, getContext, getDigestContext, getRules, noteAnalysisFailure, releaseClaim, submitResults, type UsageInput } from "./services/work";
+import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, digestCallsSpent, getContext, getDigestContext, getRules, noteAnalysisFailure, recordUnusedUsage, releaseClaim, submitResults, type UsageInput } from "./services/work";
 import type { AssistantActor, UserRow } from "./types";
 import { shorten, truncate } from "./util";
 
@@ -260,7 +260,11 @@ const DIGEST_SYSTEM = (lang: Lang) =>
   ` "worth": [{"item_id": string, "line": one sentence with the conclusion, at most 160 characters}] — only items whose verdict is worth_deep_dive and that the owner has not marked (signal is null) and has not queued;\n` +
   ` "question": one question to sleep on, at most 160 characters}`;
 
-/** How many times the model is asked for one digest: the first answer, and one more when its summary does not agree with the snapshot (core#3). */
+/**
+ * How many answers the model is paid for one digest, in all: the first, and one more when its summary does not agree with
+ * the snapshot (core#3). The count is kept across Cron runs (a run that finds the answer unusable gives the claim back, and
+ * the next run must not begin again), from what the calls were recorded as costing.
+ */
 const DIGEST_ASKS = 2;
 
 /** Writes the daily digest for one user if it is due (after 21:00 in their time zone) and theirs to write. */
@@ -272,19 +276,33 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
   const claim = await claimWork(env, actor, "digest", 1);
   if (!claim.claim_id) return false;
   await seen(env, actor);
+  let paid = false; // the cost of the model's answers is on record: with the hand-in, or on its own
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let calls = 0;
+  let model: string | undefined;
+  /** What the answers cost, when no hand-in carries it. */
+  const recordSpent = async () => {
+    if (paid || calls === 0) return;
+    paid = true;
+    await recordUnusedUsage(env, actor, claim.claim_id!, { model, input_tokens: inputTokens, output_tokens: outputTokens, calls }).catch((e) => console.error("digest usage not recorded", e));
+  };
   try {
     const day = claim.work[0].ref;
+    // The budget of this digest, whatever earlier runs spent: when it is gone the model is not asked again today.
+    const asksLeft = DIGEST_ASKS - (await digestCallsSpent(env, user.id, day));
+    if (asksLeft <= 0) {
+      console.warn(`digest of ${day} not written: the model has already answered ${DIGEST_ASKS} times for it`);
+      await releaseClaim(env, actor, claim.claim_id);
+      return false;
+    }
     let ctx = await getDigestContext(env, actor, day);
     let correction: string | undefined;
     let first: { summary: string; question: string; worth: unknown } | null = null;
-    let model: string | undefined;
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let calls = 0;
     let summary: string | undefined;
     let question: string | undefined;
     let worthRaw: unknown;
-    for (let ask = 1; ask <= DIGEST_ASKS; ask++) {
+    for (let ask = 1; ask <= asksLeft; ask++) {
       const reply = await callModel(env, {
         timeoutMs: 25_000,
         maxTokens: 4000,
@@ -301,8 +319,9 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
       const said = str(x?.summary, 600);
       const asked = str(x?.question, 160);
       if (!reply || !said || !asked) {
-        // The first answer unusable: nothing to go on, the next round tries again. A later one: the first answer's question and worth stand.
+        // The first answer unusable: nothing to go on, the next round tries again (within what is left of the budget). A later one: the first answer's question and worth stand.
         if (!first) {
+          await recordSpent();
           await releaseClaim(env, actor, claim.claim_id);
           return false;
         }
@@ -321,6 +340,7 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
       summary = undefined;
     }
     if (!first) {
+      await recordSpent();
       await releaseClaim(env, actor, claim.claim_id);
       return false;
     }
@@ -341,9 +361,11 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
     }
     const usage: UsageInput = { model, input_tokens: inputTokens, output_tokens: outputTokens, calls };
     const { outcomes } = await submitResults(env, actor, claim.claim_id, [{ kind: "digest", day, summary, worth: worth.slice(0, 50), question }], usage, user.lang);
+    paid = true; // the hand-in recorded it
     return outcomes[0]?.accepted === true;
   } catch (e) {
     console.error("digest failed", e);
+    await recordSpent();
     await releaseClaim(env, actor, claim.claim_id).catch(() => {});
     return false;
   }

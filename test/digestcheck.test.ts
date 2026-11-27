@@ -143,3 +143,58 @@ describe("internal-qa #27 (QA's reproduction on c9b9fea): a quantity that is not
     expect(wrongTotal("今天共16条，其中3条讲茶。", 16)).toBeNull();
   });
 });
+
+describe("internal-qa #27 (QA's review of a3c855e): the digest as the subject of a verb of scope counts the whole set, whatever is said of it after the number", () => {
+  it("QA's two examples: a wrong 15 for 16 items is refused; the same sentences with 16 are accepted", () => {
+    const wrong = ["This digest covers 15 items, which span tea and coffee.", "这份每日摘要汇总了15条关于茶的解读。"];
+    const right = ["This digest covers 16 items, which span tea and coffee.", "这份每日摘要汇总了16条关于茶的解读。"];
+    for (const text of wrong) {
+      expect(`${text} ${JSON.stringify(statedTotals(text))} ${wrongTotal(text, 16)}`).toBe(`${text} [15] 15`);
+    }
+    for (const text of right) {
+      expect(`${text} ${JSON.stringify(statedTotals(text))} ${wrongTotal(text, 16)}`).toBe(`${text} [16] null`);
+    }
+  });
+
+  it("other ways to say the digest covers a number, with a topic or a clause after it", () => {
+    const wrong: [string, number][] = [
+      ["Today's digest covers fifteen items about tea.", 15],
+      ["The summary covers 15 items, mostly about tea.", 15],
+      ["This daily digest has covered 15 links that are mostly about tea.", 15],
+      ["本份摘要涵盖了十五条讲茶的内容。", 15],
+      ["这份摘要包含了15条与茶有关的解读。", 15],
+      ["这一份每日摘要汇总了15篇和茶相关的文章。", 15],
+    ];
+    for (const [text, n] of wrong) expect(`${text} ${wrongTotal(text, 16)}`).toBe(`${text} ${n}`);
+  });
+
+  it("the controls QA asked to keep: quantities, subsets and topics that are not about the whole set are still not claims", () => {
+    const fine = [
+      "You saved 16 items today. Steep the tea for a total of 5 minutes.",
+      "今天存入了16条。其中共3条讲茶。",
+      "今天存入了16条。茶叶合计50克。",
+      // A topic after a count that is not the digest's own scope: still a part.
+      "You saved 3 items about tea.",
+      "这份摘要里共3条讲茶。",
+      "The digest has 3 items saved from videos.",
+      // The digest as the subject, but not a verb of scope, and not a count of the items.
+      "This digest took 5 minutes to write.",
+      "这份摘要大约要读5分钟。",
+      // A subset marker still wins over the frame.
+      "This digest covers 16 items, of these 3 items about tea.",
+      "这份摘要汇总了16条，其中共3条讲茶。",
+    ];
+    for (const text of fine) expect(`${text} ${wrongTotal(text, 16)}`).toBe(`${text} null`);
+  });
+
+  it("a genuine miscount is still refused, with or without the frame", () => {
+    for (const [text, n] of [
+      ["You saved 15 items today. Steep the tea for a total of 5 minutes.", 15],
+      ["今天共15条，其中3条讲茶。", 15],
+      ["This digest covers 15 items.", 15],
+      ["这份每日摘要汇总了15条解读。", 15],
+    ] as const) {
+      expect(`${text} ${wrongTotal(text, 16)}`).toBe(`${text} ${n}`);
+    }
+  });
+});

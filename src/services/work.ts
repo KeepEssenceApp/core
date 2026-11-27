@@ -234,6 +234,37 @@ export async function releaseClaim(env: Env, actor: AssistantActor, claimId: str
   ]);
 }
 
+/**
+ * What a model call cost although its answer could not be handed in (a reply that is not JSON, or lacks a field): it is
+ * recorded against the claim like any hand-in, with no items accepted. Without this the tokens were paid and never counted,
+ * and nothing remembered that the digest had been asked about (core#3).
+ */
+export async function recordUnusedUsage(env: Env, actor: AssistantActor, claimId: string, usage: UsageInput): Promise<void> {
+  if (!usage.calls) return;
+  const claim = await ownClaim(env, actor, claimId);
+  await env.DB.prepare(
+    `INSERT INTO usage_records (id, user_id, assistant_id, claim_id, kind, model, input_tokens, output_tokens, calls, items, self_reported, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+  )
+    .bind(newId("use"), actor.userId, actor.assistantId, claim.id, claim.kind, usage.model ?? null, usage.input_tokens ?? 0, usage.output_tokens ?? 0, usage.calls, now())
+    .run();
+}
+
+/**
+ * How many answers the core's own model calls have returned for the digest of this day, over every claim and every Cron
+ * run (the usage records of the claims that were for this day; nothing else is counted). The budget of a digest is spent
+ * here, so that a run that gives up and a claim that is released cannot start the count again.
+ */
+export async function digestCallsSpent(env: Env, userId: string, day: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(SUM(u.calls), 0) AS n FROM usage_records u JOIN claims c ON c.id = u.claim_id
+     WHERE u.user_id = ?1 AND u.kind = 'digest' AND u.self_reported = 0 AND c.user_id = ?1 AND c.kind = 'digest' AND c.refs = ?2`,
+  )
+    .bind(userId, JSON.stringify([day]))
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 /** A built-in assistant tries an item at most this often; then it says the content could not be read (QA #20). */
 export const ANALYSIS_MAX_ATTEMPTS = 3;
 
