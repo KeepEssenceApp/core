@@ -8,6 +8,7 @@ import { listAssistants } from "../services/accounts";
 import { assetText, deleteIfUnreferenced, isTextType, refStatement, type AssetRow } from "../services/assets";
 import { cancelJob } from "../services/fetchers";
 import { idempotent, rateLimit } from "../services/guard";
+import { withoutSiteTag } from "../services/pagerules";
 import {
   bodyMaxChars,
   cleanTitle,
@@ -82,7 +83,8 @@ async function save(cx: Cx): Promise<Result> {
   }
 
   const id = newId("itm");
-  const clientTitle = cleanTitle(b.title);
+  // A browser sends the page's title, and Xiaohongshu's ends in its own name: not part of what the note is called.
+  const clientTitle = withoutSiteTag(cleanTitle(b.title), b.url);
   const site = defaultSite(b.url);
   const title = clientTitle || firstSentence(text) || (b.kind === "link" ? (site ?? "") : "");
   const fetchNeeded = b.kind === "link" && (!text || !clientTitle);

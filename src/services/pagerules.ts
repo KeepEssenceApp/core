@@ -212,6 +212,22 @@ const TITLE_URL = /^(?:https?:[/_]{2}|www\.)|^[\w-]+(?:\.[\w-]+)+\/\S*$/i;
 
 const same = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
 
+// Xiaohongshu ends every page title with its own name: "一个家最好的状态 - rednote". That is the site, not what the
+// note is called. Only at the very end, after a space and a dash (or a pipe); "登录 - rednote - share, connect, love"
+// (the sign-in page) does not end in it and is left to `usableTitle`.
+const SITE_TAG = /\s+[-–—|]\s*rednote\s*$/i;
+
+/**
+ * A page title of Xiaohongshu without the site's name at its end (QA, "- rednote"). Any other site's title is returned
+ * as it is: a blog post that happens to end in "- rednote" is called that. The address is the item's own (the short
+ * links count). When nothing would be left, the title is returned as it is.
+ */
+export function withoutSiteTag(title: string, url: string | null | undefined): string {
+  if (!onDomain(hostOf(url ?? ""), XIAOHONGSHU)) return title;
+  const rest = title.replace(SITE_TAG, "").trim();
+  return rest || title;
+}
+
 /**
  * Does this title name the page? Not when it is empty or one character, an address, a wall word, a
  * login / error / verification page's title, or only the site's name (the `site` the page gave, or the host).
