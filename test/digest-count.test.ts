@@ -159,3 +159,46 @@ describe("core#3: another assistant's digest is refused with the reason, and sto
     expect(r.json.outcomes[0].accepted).toBe(true);
   });
 });
+
+describe("internal-qa #27: a summary that agrees with the digest is not refused for the other quantities in it", () => {
+  const FINE = [
+    ["en", "You saved 16 items today. Steep the tea for a total of 5 minutes."],
+    ["zh", "今天存入了16条。其中共3条讲茶。"],
+    ["zh", "今天存入了16条。茶叶合计50克。"],
+  ] as const;
+
+  for (const [lang, summary] of FINE) {
+    it(`the built-in assistant, ${lang}: one call, and "${summary}" is stored as the model wrote it (no second ask, no fallback sentence)`, async () => {
+      const { ann } = await dayOf(16, lang);
+      const calls: any[] = [];
+      const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { digest: () => ({ summary, worth: [], question: "What would you brew tomorrow?" }) }) });
+      await runMinute(env);
+      expect(calls.filter(isDigest)).toHaveLength(1);
+      const d = await digestOf(env, ann.token);
+      expect(d.summary).toBe(summary);
+      expect(d.counts.saved).toBe(16);
+      expect(new Set(lines(d)).size).toBe(16);
+      const usage = (await call(env, "GET", "/v1/usage", { token: ann.token })).json.assistants.find((u: any) => u.name === "Built-in assistant");
+      expect(usage).toMatchObject({ calls: 1 });
+    });
+  }
+
+  it("another assistant: the same summaries are accepted for the right number of items, and a wrong total next to such a quantity is still refused", async () => {
+    const off = makeEnv();
+    const { ann, helper } = await withHelper(off);
+    await analysed(off, ann, helper, ["One thought.", "Two thoughts.", "Three thoughts."], SKIPPABLE);
+    advance(9 * HOUR_MS);
+    await refresh(off, helper);
+    const c = await claim(off, helper.access, "digest");
+    const day = c.work[0].ref;
+    const wrong = await submit(off, helper.access, c.claim_id, [{ kind: "digest", day, summary: "You saved 5 items today. Steep the tea for a total of 3 minutes.", worth: [], question: "What next?" }]);
+    expect(wrong.status).toBe(400);
+    expect(wrong.json.error.code).toBe("invalid_result");
+    expect(wrong.json.error.message).toContain("5");
+    expect((await db(off, "SELECT status FROM digests WHERE day = ?", day))[0].status).toBe("due");
+    const right = await submit(off, helper.access, c.claim_id, [{ kind: "digest", day, summary: "You saved 3 items today. Steep the tea for a total of 5 minutes.", worth: [], question: "What next?" }]);
+    expect(right.status).toBe(200);
+    expect(right.json.outcomes[0].accepted).toBe(true);
+    expect((await digestOf(off, ann.token)).summary).toBe("You saved 3 items today. Steep the tea for a total of 5 minutes.");
+  });
+});
