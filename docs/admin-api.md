@@ -33,7 +33,7 @@ The code is in `src/handlers/admin.ts`; the tests are in `test/admin.test.ts`.
     "last_7d": { "calls": 0, "input_tokens": 0, "output_tokens": 0 }
   },
   "cron": { "minute_ran_at": null, "hourly_ran_at": null },
-  "config": { "model": "…", "model_configured": true, "mail_configured": false, "push_configured": true, "version": "…" }
+  "config": { "model": "…", "models": { "triage": { "model": "…", "effort": "low" }, "worker": { "model": "…", "effort": "medium" } }, "model_configured": true, "mail_configured": false, "push_configured": true, "version": "…" }
 }
 ```
 
@@ -42,7 +42,11 @@ assistants only. `active_7d` is users with any device used in the last 7 days. `
 items that are not archived. `waiting` leaves out the items of suspended accounts (nobody works on
 them). `cron` is when each job last finished (`null`: never since this was deployed).
 
-`config`: `model` is `LLM_MODEL`; `model_configured` is true when `LLM_API_KEY` is set,
+`config`: `models` is what each kind of job uses: `{ "triage": { "model", "effort" }, "worker": { "model", "effort" } }`
+(`worker` is the analysis and the daily digest; the values come from `LLM_MODEL_TRIAGE` / `LLM_MODEL_WORKER`, else
+`LLM_MODEL`, else the defaults, and `LLM_EFFORT_TRIAGE` / `LLM_EFFORT_WORKER`). `model` is one string for what read it
+before: the model's name when both jobs use the same one, otherwise both named
+(`claude-haiku-5-5 (triage), claude-sonnet-5-5 (analysis, digest)`). `model_configured` is true when `LLM_API_KEY` is set,
 `mail_configured` when both `RESEND_API_KEY` and `EMAIL_FROM` are, `push_configured` when both
 VAPID keys are. `version` is the variable `CORE_VERSION` when it is set, otherwise the version in
 `package.json`. No secret is ever returned.

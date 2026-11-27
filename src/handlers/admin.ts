@@ -14,7 +14,7 @@ import { CRON_KEYS } from "../cron";
 import type { Env } from "../env";
 import { err } from "../errors";
 import { releaseAllClaimsStatements } from "../services/accounts";
-import { DEFAULT_MODEL } from "../services/model";
+import { modelFor } from "../services/model";
 import { likePattern } from "../services/work";
 import { addDays, localDay } from "../time";
 import { b64url, fromB64url, iso, newId, parseJson, safeEqual } from "../util";
@@ -383,6 +383,11 @@ const getOverview: AdminHandler = async (env) => {
   // The outcome of the last sign-in mail: "sent", or why it failed. Never an address or a code.
   const mailRow = state.results.find((r: any) => r.key === "mail.last") as { value: string; updated_at: number } | undefined;
   const mailLast = mailRow ? { at: iso(Number(mailRow.updated_at)), result: String(mailRow.value).slice(0, 200) } : null;
+  // What the two kinds of job really use. `config.model` stays one string for what reads it as before: the model when both
+  // jobs use the same one, else both named, so it never shows the sort's model as if it were the analysis's.
+  const triage = modelFor(env, "triage");
+  const worker = modelFor(env, "worker");
+  const modelLabel = triage.model === worker.model ? triage.model : `${triage.model} (triage), ${worker.model} (analysis, digest)`;
   return json({
     users: { total: one(users).total ?? 0, active_7d: one(active7d).n ?? 0, suspended: one(users).suspended ?? 0 },
     invites: { total: one(invites).total ?? 0, pending: one(invites).pending ?? 0 },
@@ -397,7 +402,8 @@ const getOverview: AdminHandler = async (env) => {
     },
     cron: { minute_ran_at: ranAt(CRON_KEYS.minute), hourly_ran_at: ranAt(CRON_KEYS.hourly) },
     config: {
-      model: env.LLM_MODEL || DEFAULT_MODEL,
+      model: modelLabel,
+      models: { triage, worker },
       model_configured: Boolean(env.LLM_API_KEY),
       mail_configured: mailConfigured(env),
       feedback_forwarding: forwardingConfigured(env),

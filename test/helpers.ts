@@ -29,7 +29,12 @@ export function makeEnv(extra: Partial<Env> = {}): Env {
     SIGNING_KEY: "test-signing-key",
     LLM_API_KEY: undefined,
     LLM_BASE_URL: "https://model.test",
-    LLM_MODEL: "claude-haiku-5-5",
+    // No model variable at all: a test that wants one sets it, the rest get the built-in defaults of each job.
+    LLM_MODEL: undefined,
+    LLM_MODEL_TRIAGE: undefined,
+    LLM_MODEL_WORKER: undefined,
+    LLM_EFFORT_TRIAGE: undefined,
+    LLM_EFFORT_WORKER: undefined,
     RESEND_API_KEY: undefined,
     EMAIL_FROM: undefined,
     VAPID_PRIVATE_KEY: undefined,

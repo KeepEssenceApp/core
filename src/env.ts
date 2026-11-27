@@ -10,7 +10,16 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   ALLOW_HTTP?: string;
   LLM_BASE_URL?: string;
+  /** The model for every job, as before. Used only by a job whose own variable below is not set. */
   LLM_MODEL?: string;
+  /** The model for the dispatch assistant's triage (default claude-haiku-5-5). */
+  LLM_MODEL_TRIAGE?: string;
+  /** The model for the built-in assistant's analysis and the daily digest (default claude-sonnet-5-5). */
+  LLM_MODEL_WORKER?: string;
+  /** low, medium or high (default low). */
+  LLM_EFFORT_TRIAGE?: string;
+  /** low, medium or high (default medium). */
+  LLM_EFFORT_WORKER?: string;
   TRIAGE_BATCH?: string;
   TRIAGE_USERS_PER_RUN?: string;
   ANALYSIS_BATCH?: string;

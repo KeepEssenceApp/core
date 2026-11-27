@@ -26,7 +26,17 @@ export type ContentBlock =
   | { type: "image"; source: { type: "url"; url: string } }
   | { type: "document"; source: { type: "url"; url: string } };
 
+/**
+ * Which job a request is for, which decides the model and how hard it thinks: `triage` is the dispatch assistant's
+ * sort (title, site and the opening only: light), `worker` is the built-in assistant's analysis and the daily digest
+ * (what the owner reads: worth a stronger model).
+ */
+export type ModelRole = "triage" | "worker";
+export type Effort = "low" | "medium" | "high";
+
 export interface ModelRequest {
+  /** Which job this is for: the model and the effort come from it (see `modelFor`). */
+  role: ModelRole;
   system: string;
   content: string | ContentBlock[];
   maxTokens: number;
@@ -45,7 +55,28 @@ export interface ModelRequest {
   onUnusedReply?: (cost: { inputTokens: number; outputTokens: number; model: string }) => void;
 }
 
-export const DEFAULT_MODEL = "claude-haiku-5-5";
+/** What each job asks for when nothing is configured (the table in internal-qa#99). */
+export const ROLE_DEFAULTS: Record<ModelRole, { model: string; effort: Effort }> = {
+  triage: { model: "claude-haiku-5-5", effort: "low" },
+  worker: { model: "claude-sonnet-5-5", effort: "medium" },
+};
+
+const EFFORTS: readonly string[] = ["low", "medium", "high"];
+
+/**
+ * The model and the effort for a job. The model: the job's own variable (`LLM_MODEL_TRIAGE`, `LLM_MODEL_WORKER`), else
+ * `LLM_MODEL` (the one variable of before: one model for every job, so an existing set-up keeps what it asked for), else
+ * the default above. The effort: `LLM_EFFORT_TRIAGE` / `LLM_EFFORT_WORKER` when it is low, medium or high, else the default.
+ * An empty or unknown value counts as not set.
+ */
+export function modelFor(env: Env, role: ModelRole): { model: string; effort: Effort } {
+  const own = role === "triage" ? env.LLM_MODEL_TRIAGE : env.LLM_MODEL_WORKER;
+  const effort = (role === "triage" ? env.LLM_EFFORT_TRIAGE : env.LLM_EFFORT_WORKER)?.trim().toLowerCase();
+  return {
+    model: own?.trim() || env.LLM_MODEL?.trim() || ROLE_DEFAULTS[role].model,
+    effort: effort && EFFORTS.includes(effort) ? (effort as Effort) : ROLE_DEFAULTS[role].effort,
+  };
+}
 
 export function modelConfigured(env: Env): boolean {
   return Boolean(env.LLM_API_KEY);
@@ -89,7 +120,7 @@ export async function askModel(env: Env, req: ModelRequest): Promise<ModelAnswer
   const none = (failure: string): ModelAnswer => ({ reply: null, cost: null, failure });
   if (!env.LLM_API_KEY) return none("no credential");
   const base = (env.LLM_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
-  const model = env.LLM_MODEL || DEFAULT_MODEL;
+  const { model, effort } = modelFor(env, req.role);
   const timeoutMs = req.budget ? Math.min(req.timeoutMs, req.budget.until - Date.now()) : req.timeoutMs;
   if (timeoutMs <= 0) return none("time budget spent");
   const abort = new AbortController();
@@ -120,11 +151,11 @@ export async function askModel(env: Env, req: ModelRequest): Promise<ModelAnswer
       }),
     });
   try {
-    // These are short, routine jobs: ask for low effort. A gateway that does not know the
-    // field answers 400; then ask once more without it.
+    // Ask for the job's effort (low for the sort, medium for what the owner reads). A gateway that does
+    // not know the field answers 400; then ask once more without it.
     let effortRefused = false;
     if (!take()) return none("request budget spent");
-    let response = await send(req.noEffort ? {} : { output_config: { effort: "low" } });
+    let response = await send(req.noEffort ? {} : { output_config: { effort } });
     if (response.status === 400 && !req.noEffort) {
       await response.body?.cancel().catch(() => {});
       if (!take()) return none("request budget spent");
