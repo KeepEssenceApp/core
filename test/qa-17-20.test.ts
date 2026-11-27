@@ -5,7 +5,7 @@ import { runMinute } from "../src/cron";
 import { fileBlock } from "../src/builtin";
 import { decodeText } from "../src/services/assets";
 import { firstSentence } from "../src/util";
-import { builtinModel, call, db, idem, invite, LLM, loginCode, makeEnv, saveText, signIn, TZ, type Outbound } from "./helpers";
+import { builtinModel, call, db, idem, invite, LLM, loginCode, makeEnv, saveText, signIn, signInMine, TZ, type Outbound } from "./helpers";
 
 const enc = new TextEncoder();
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
@@ -186,10 +186,17 @@ describe("QA #20: uploaded files are read, and a failing analysis stops after th
 });
 
 describe("QA #18: analyses and digests are written in the account's language", () => {
-  it("QA #18: (a) PATCH /v1/settings writes the language, and (b) the built-in assistant reads it at analysis time", async () => {
+  // A model that does as it is told: it writes in the language the request names. (The default
+  // stand-in echoes the item's title, which is the very thing the language check looks for.)
+  const obedient = (input: any) =>
+    input.write_in === "English"
+      ? { summary: "A short note.", key_fact: "Text, short", points: ["First point."], verdict: "good_to_know" }
+      : { summary: "一条简短的笔记。", key_fact: "文本，很短", points: ["第一点。"], verdict: "good_to_know" };
+
+  it("QA #18: (a) PATCH /v1/settings writes the language, and (b) the built-in assistant reads it at analysis time (with \"always use my language\" on)", async () => {
     const calls: any[] = [];
-    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls) });
-    const ann = await signIn(env); // an English account
+    const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls, { analysis: obedient }) });
+    const ann = await signInMine(env); // an English account that always wants its own language
     await saveText(env, ann.token, "中文测试笔记 — 明天上午十点和产品团队开会。");
     await runMinute(env);
     // The account's language decides, not the language of the content.
@@ -212,11 +219,11 @@ describe("QA #18: analyses and digests are written in the account's language", (
     expect((await db(env, "SELECT COUNT(*) AS n FROM analyses"))[0].n).toBe(2);
   });
 
-  it("QA #18: (b) the daily digest follows the language the account has when it is written", async () => {
+  it("QA #18: (b) the daily digest follows the language the account has when it is written (with \"always use my language\" on)", async () => {
     const { advance, MINUTE } = await import("../src/clock");
     const calls: any[] = [];
     const env = makeEnv({ ...LLM, OUTBOUND: builtinModel(calls) });
-    const ann = await signIn(env);
+    const ann = await signInMine(env);
     await saveText(env, ann.token, "A thought before the switch.");
     await runMinute(env);
     await call(env, "PATCH", "/v1/settings", { token: ann.token, body: { lang: "zh" } });

@@ -14,6 +14,8 @@ export interface Env {
   TRIAGE_BATCH?: string;
   TRIAGE_USERS_PER_RUN?: string;
   ANALYSIS_BATCH?: string;
+  /** All the model requests for one item's analysis together, in milliseconds (default 40000). */
+  ANALYSIS_BUDGET_MS?: string;
   ANALYSIS_USERS_PER_RUN?: string;
   ANALYSIS_PER_USER_PER_DAY?: string;
   DIGEST_PER_USER_PER_DAY?: string;

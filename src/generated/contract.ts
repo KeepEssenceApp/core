@@ -1578,6 +1578,9 @@ export const CONTRACT: Contract = {
               "en"
             ]
           },
+          "always_my_language": {
+            "type": "boolean"
+          },
           "roles": {
             "type": "object",
             "additionalProperties": false,

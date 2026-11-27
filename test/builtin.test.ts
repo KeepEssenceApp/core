@@ -18,8 +18,8 @@ describe("K11 built-in worker", () => {
     expect(got.stage).toBe("analysed");
     expect(got.analysis).toMatchObject({ unavailable: false, summary: "About: Brewing green tea", key_fact: "Text, short", points: ["First point.", "Second point."], verdict: "worth_deep_dive" });
     expect(got.analysis.assistant.name).toBe("Built-in assistant");
-    // The model was asked to write in the user's language and got the content.
-    expect(calls[1].request.system).toContain("English");
+    // The model was asked to write in the language of the item (English text, an English account) and got the content.
+    expect(calls[1].request.system).toContain("Write in the language the item's own text is written in");
     expect(calls[1].request.messages[0].content).toContain("Steep it for two minutes");
     // Usage of built-in assistants is measured by the core, not self-reported.
     const usage = (await call(env, "GET", "/v1/usage", { token: ann.token })).json.assistants;

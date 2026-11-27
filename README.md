@@ -164,6 +164,7 @@ npm run typecheck   # 类型检查
 |---|---|---|
 | `TRIAGE_BATCH`、`TRIAGE_USERS_PER_RUN` | 5、2 | 分派助手每分钟每个用户初筛几条、一次照顾几个用户 |
 | `ANALYSIS_BATCH`、`ANALYSIS_USERS_PER_RUN` | 3、1 | 工作助手每分钟每个用户解读几条、一次照顾几个用户 |
+| `ANALYSIS_BUDGET_MS` | 40000 | 解读一条用到的所有模型请求合在一起最多多久（第一次最多 25 秒，再问一次拿剩下的；请求最多 3 个） |
 | `ANALYSIS_PER_USER_PER_DAY`、`DIGEST_PER_USER_PER_DAY` | 200、1 | 工作助手每个用户每天的上限 |
 | `BODY_MAX_CHARS` | 100000 | 抓来的网页正文最多存多少字 |
 | `SAVE_RATE_PER_MINUTE` | 120 | 每台设备每分钟最多存入几次 |

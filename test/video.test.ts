@@ -10,7 +10,7 @@ import { cancelJob, fetchContent, loadFetchSettings, usable } from "../src/servi
 import { fetchItemContent } from "../src/services/items";
 import { finishVideo, pollVideo } from "../src/services/video";
 import { shownText } from "../src/builtin";
-import { ADMIN, builtinModel, call, connectAssistant, db, idem, LLM, makeEnv, saveText, signIn, T0, tool, type Outbound, type Session } from "./helpers";
+import { ADMIN, builtinModel, call, connectAssistant, db, idem, LLM, makeEnv, saveText, signIn, signInMine, T0, tool, type Outbound, type Session } from "./helpers";
 
 const RUNNER = "https://runner.example.net";
 const KEY = "runner-key-0123456789";
@@ -60,7 +60,11 @@ async function world(extra: Partial<Env> = {}) {
   let env!: Env;
   const runner = runnerStub(() => env);
   const modelCalls: any[] = [];
-  const model = builtinModel(modelCalls);
+  // The stand-in's usual answer ("About: <title>") puts a Chinese title in an English sentence, which the
+  // language check rightly asks about again. These tests count calls, so the answer here is plainly the account's own language.
+  const model = builtinModel(modelCalls, {
+    analysis: () => ({ summary: "A pine shelf built in a weekend.", key_fact: "Video, short", points: ["Saw the boards, sand the edges, varnish twice."], verdict: "worth_deep_dive" }),
+  });
   const outbound: Outbound = async (url, init) => {
     if (url.startsWith("https://model.test/")) return model(url, init);
     if (url.startsWith(RUNNER + "/")) return runner.outbound(url, init);
@@ -69,7 +73,8 @@ async function world(extra: Partial<Env> = {}) {
   env = makeEnv({ ...LLM, OUTBOUND: outbound, ...extra });
   const set = await call(env, "PUT", "/admin/fetch", { token: ADMIN, body: { order: ["jina", "direct", "firecrawl"], jina: { enabled: true, endpoint: RUNNER, key: KEY } } });
   expect(set.status).toBe(200);
-  return { env, runner, modelCalls, ann: await signIn(env) };
+  // These tests are about videos, not about the language of an analysis: the account always wants its own language, and the stand-in answers in it.
+  return { env, runner, modelCalls, ann: await signInMine(env) };
 }
 
 const kinds = (calls: any[]) => calls.map((c) => (c.request.system.startsWith("You sort") ? "triage" : c.request.system.startsWith("You analyse") ? "analysis" : "digest"));

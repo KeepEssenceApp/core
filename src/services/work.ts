@@ -358,6 +358,19 @@ export interface UsageInput {
   calls?: number;
 }
 
+/**
+ * Records what was paid for although nothing could be handed in (a reply that was not JSON, an item whose
+ * answer was refused): the tokens were spent, so they are counted, with no item accepted.
+ */
+export async function recordUnsubmittedUsage(env: Env, actor: AssistantActor, claimId: string, kind: WorkKind, usage: UsageInput): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO usage_records (id, user_id, assistant_id, claim_id, kind, model, input_tokens, output_tokens, calls, items, self_reported, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+  )
+    .bind(newId("use"), actor.userId, actor.assistantId, claimId, kind, usage.model ?? null, usage.input_tokens ?? 0, usage.output_tokens ?? 0, usage.calls ?? 0, actor.builtIn ? 0 : 1, now())
+    .run();
+}
+
 function invalid(ref: string, zh: string, en: string): ApiError {
   return err("invalid_result", `${ref}：${zh}`, `${ref}: ${en}`);
 }
@@ -621,6 +634,7 @@ export async function getRules(env: Env, actor: AssistantActor, kind: WorkKind) 
     default_analysis_assistant: assistants.find((a) => a.id === user.role_analysis)?.name ?? null,
     expiry_options: parseJson<number[]>(user.expiry_options, LIMITS.expiry_options_default),
     lang: user.lang,
+    always_my_language: user.always_my_language === 1,
     timezone: user.timezone,
   };
 }

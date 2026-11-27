@@ -8,6 +8,17 @@ export interface ModelReply {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** The gateway answered 400 to the `effort` field and the request was sent again without it: do not ask for it again. */
+  effortRefused?: boolean;
+}
+
+/**
+ * What several requests for one piece of work may use together: until when (Date.now() milliseconds)
+ * and how many HTTP requests. Each request takes from it, so a second ask does not get a fresh deadline.
+ */
+export interface ModelBudget {
+  until: number;
+  requests: number;
 }
 
 export type ContentBlock =
@@ -20,8 +31,18 @@ export interface ModelRequest {
   content: string | ContentBlock[];
   maxTokens: number;
   timeoutMs: number;
+  /** Shared with the other requests for the same piece of work: the time limit is the least of `timeoutMs` and what is left of it. */
+  budget?: ModelBudget;
+  /** Do not send the `effort` field (an earlier request found that the gateway refuses it). */
+  noEffort?: boolean;
   /** Told why there is no reply (for the log). Never contains content or the key. */
   onFailure?: (reason: string) => void;
+  /**
+   * Told what a reply that came back with nothing to use (a refusal, no content, an empty text) cost, when
+   * the provider reported it: such a reply is paid for all the same. Not called when the reply carries no
+   * usage (nothing is made up), and not for a reply that is returned (its cost is in the reply).
+   */
+  onUnusedReply?: (cost: { inputTokens: number; outputTokens: number; model: string }) => void;
 }
 
 export const DEFAULT_MODEL = "claude-haiku-5-5";
@@ -69,8 +90,17 @@ export async function askModel(env: Env, req: ModelRequest): Promise<ModelAnswer
   if (!env.LLM_API_KEY) return none("no credential");
   const base = (env.LLM_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
   const model = env.LLM_MODEL || DEFAULT_MODEL;
+  const timeoutMs = req.budget ? Math.min(req.timeoutMs, req.budget.until - Date.now()) : req.timeoutMs;
+  if (timeoutMs <= 0) return none("time budget spent");
   const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), req.timeoutMs);
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  /** One HTTP request's worth of the budget. */
+  const take = () => {
+    if (!req.budget) return true;
+    if (req.budget.requests <= 0) return false;
+    req.budget.requests--;
+    return true;
+  };
   const send = (extra: Record<string, unknown>) =>
     outbound(env, `${base}/v1/messages`, {
       method: "POST",
@@ -92,9 +122,13 @@ export async function askModel(env: Env, req: ModelRequest): Promise<ModelAnswer
   try {
     // These are short, routine jobs: ask for low effort. A gateway that does not know the
     // field answers 400; then ask once more without it.
-    let response = await send({ output_config: { effort: "low" } });
-    if (response.status === 400) {
+    let effortRefused = false;
+    if (!take()) return none("request budget spent");
+    let response = await send(req.noEffort ? {} : { output_config: { effort: "low" } });
+    if (response.status === 400 && !req.noEffort) {
       await response.body?.cancel().catch(() => {});
+      if (!take()) return none("request budget spent");
+      effortRefused = true;
       response = await send({});
     }
     if (!response.ok) {
@@ -113,9 +147,12 @@ export async function askModel(env: Env, req: ModelRequest): Promise<ModelAnswer
       .join("");
     if (!text.trim()) return { reply: null, cost, failure: "reply is empty" };
     const used = cost ?? { model: typeof data.model === "string" ? data.model : model, inputTokens: 0, outputTokens: 0 };
-    return { reply: { text, model: used.model, inputTokens: used.inputTokens, outputTokens: used.outputTokens }, cost: used };
+    return {
+      reply: { text, model: used.model, inputTokens: used.inputTokens, outputTokens: used.outputTokens, ...(effortRefused ? { effortRefused } : {}) },
+      cost: used,
+    };
   } catch (e) {
-    return none(abort.signal.aborted ? `no reply within ${req.timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
+    return none(abort.signal.aborted ? `no reply within ${timeoutMs} ms` : `request failed: ${e instanceof Error ? e.name : "error"}`);
   } finally {
     clearTimeout(timer);
   }
@@ -124,7 +161,11 @@ export async function askModel(env: Env, req: ModelRequest): Promise<ModelAnswer
 /** The usable reply, or null (the caller then leaves the work for later). For the jobs that do not account for an answer they cannot use. */
 export async function callModel(env: Env, req: ModelRequest): Promise<ModelReply | null> {
   const answer = await askModel(env, req);
-  if (!answer.reply) req.onFailure?.(answer.failure ?? "no reply");
+  if (!answer.reply) {
+    req.onFailure?.(answer.failure ?? "no reply");
+    // A reply with nothing to use still cost what the provider says it cost; one that reports nothing is not made up.
+    if (answer.cost) req.onUnusedReply?.(answer.cost);
+  }
   return answer.reply;
 }
 

@@ -51,6 +51,7 @@ ALLOW_HTTP = "0"
 TRIAGE_BATCH = "5"                # items per dispatch run, per user
 TRIAGE_USERS_PER_RUN = "2"
 ANALYSIS_BATCH = "3"              # items per worker run, per user
+ANALYSIS_BUDGET_MS = "40000"      # every model request for one item's analysis, together
 ANALYSIS_USERS_PER_RUN = "1"
 ANALYSIS_PER_USER_PER_DAY = "200"
 DIGEST_PER_USER_PER_DAY = "1"
