@@ -82,3 +82,64 @@ describe("the number that is not the digest's", () => {
     expect(why.zh).toContain("16");
   });
 });
+
+describe("internal-qa #27 (QA's reproduction on c9b9fea): a quantity that is not the whole set's is not a claim", () => {
+  it("the three summaries QA found refused although they agree with the digest's 16: a duration, a subset, a weight", () => {
+    const cases: [string, number[]][] = [
+      ["You saved 16 items today. Steep the tea for a total of 5 minutes.", [16]],
+      ["今天存入了16条。其中共3条讲茶。", [16]],
+      ["今天存入了16条。茶叶合计50克。", [16]],
+      ["You saved 16 items today.", [16]], // QA's control
+    ];
+    for (const [text, want] of cases) {
+      expect(`${text} => ${statedTotals(text)}`).toBe(`${text} => ${want}`);
+      expect(`${text} => ${wrongTotal(text, 16)}`).toBe(`${text} => null`);
+    }
+  });
+
+  it("other quantities of the same kind: time, weight, money, steps, a price, a number of cups", () => {
+    for (const text of [
+      "You saved 16 items today. The reading adds up to a total of 3 hours.",
+      "You saved 16 items today. Brew with a total of 4 grams of leaves and a total of 200 ml of water.",
+      "You saved 16 items today. The three tea shops charge a total of 30 dollars.",
+      "You saved 16 items today. The recipe has a total of 6 steps.",
+      "今天存入了16条。阅读时间共3个小时。",
+      "今天存入了16条。泡茶要两个步骤，一共花了10分钟。",
+      "今天存入了16条。三种茶共5斤，合计120元。",
+      "今天存入了16条。这个月共4次存入过茶的文章。",
+    ]) {
+      expect(`${text} => ${statedTotals(text)}`).toBe(`${text} => 16`);
+    }
+  });
+
+  it("subsets and topics are not claims about the whole: said as such, or a topic or a source right after the number", () => {
+    for (const text of [
+      "You saved 16 items today. Of these, 3 items were saved from videos.",
+      "You saved 16 items, including 3 items saved from videos.",
+      "You saved 16 items, and 3 items were saved from videos.",
+      "You saved 16 items, among them 4 analysed items about tea.",
+      "You saved 16 items. Out of 16 items, 3 items were analysed twice.",
+      "今天存入了16条，其中存入了3条视频。",
+      "今天存入了16条，当中共3条讲茶，其余讲咖啡。",
+      "今天存入了16条。茶叶共3条。", // a count of one topic, in a later sentence
+    ]) {
+      expect(`${text} => ${statedTotals(text)}`).toBe(`${text} => 16`);
+    }
+    // A part said alone (no whole stated) is no claim either.
+    for (const text of ["You saved 3 items about tea and 13 about coffee.", "今天存入了3条讲茶的，13条讲咖啡的。"]) expect(`${text} => ${statedTotals(text)}`).toBe(`${text} => `);
+  });
+
+  it("the whole set's total is still a claim, whatever else the summary says about quantities", () => {
+    expect(wrongTotal("You saved 15 items today. Steep the tea for a total of 5 minutes.", 16)).toBe(15);
+    expect(wrongTotal("今天存入了十五条。茶叶合计50克。", 16)).toBe(15);
+    expect(wrongTotal("今天共15条，其中3条讲茶。", 16)).toBe(15);
+    expect(wrongTotal("共计十五份。其中共3条讲茶。", 16)).toBe(15);
+    expect(wrongTotal("A total of 15 items, mostly about tea.", 16)).toBe(15);
+    expect(wrongTotal("A total of 15 across the day, and 5 minutes of reading in total.", 16)).toBe(15);
+    expect(wrongTotal("You saved 16 items. Altogether 15 items were analysed.", 16)).toBe(15);
+    expect(wrongTotal("这份每日摘要汇总了 15 条解读，阅读共需 3 个小时。", 16)).toBe(15);
+    // The same sentences with the right number are fine.
+    expect(wrongTotal("You saved 16 items today. Steep the tea for a total of 5 minutes.", 16)).toBeNull();
+    expect(wrongTotal("今天共16条，其中3条讲茶。", 16)).toBeNull();
+  });
+});
