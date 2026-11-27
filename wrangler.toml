@@ -49,8 +49,11 @@ LLM_MODEL_TRIAGE = "claude-haiku-5-5"
 LLM_EFFORT_TRIAGE = "low"
 LLM_MODEL_WORKER = "claude-sonnet-5-5"
 LLM_EFFORT_WORKER = "medium"
-# The address sign-in codes are sent from.
+# The address sign-in codes and invitation mails are sent from.
 EMAIL_FROM = "KeepEssence <login@keepessence.app>"
+# The contact address named in the invitation mail. Empty: that sentence is left out. Fill it in
+# once mail to it has been checked (delivery of login@ and info@ has not been measured).
+MAIL_CONTACT = ""
 # Set to "1" only for local development over plain http.
 ALLOW_HTTP = "0"
 # Tunable limits (strings; empty or missing means the default written here).

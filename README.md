@@ -150,7 +150,7 @@ npm run typecheck   # 类型检查
    npm run gen:vapid                           # 生成一对通知用的密钥，把打印的两个值分别存进去：
    npx wrangler secret put VAPID_PUBLIC_KEY
    npx wrangler secret put VAPID_PRIVATE_KEY
-   npx wrangler secret put RESEND_API_KEY      # 可选：配了它和 EMAIL_FROM，验证码就发邮件
+   npx wrangler secret put RESEND_API_KEY      # 可选：配了它和 EMAIL_FROM，验证码和邀请通知就发邮件
    npx wrangler secret put EMAIL_FROM          # 可选：例如 "Sign in <login@你的域名>"
    ```
 
@@ -167,6 +167,7 @@ npm run typecheck   # 类型检查
 | `ANALYSIS_BATCH`、`ANALYSIS_USERS_PER_RUN` | 3、1 | 工作助手每分钟每个用户解读几条、一次照顾几个用户 |
 | `ANALYSIS_BUDGET_MS` | 40000 | 解读一条用到的所有模型请求合在一起最多多久（第一次最多 25 秒，再问一次拿剩下的；请求最多 3 个） |
 | `ANALYSIS_PER_USER_PER_DAY`、`DIGEST_PER_USER_PER_DAY` | 200、1 | 工作助手每个用户每天的上限 |
+| `MAIL_CONTACT` | 空 | 邀请通知里写的联系地址；空就不写那句话 |
 | `BODY_MAX_CHARS` | 100000 | 抓来的网页正文最多存多少字 |
 | `SAVE_RATE_PER_MINUTE` | 120 | 每台设备每分钟最多存入几次 |
 | `PUBLIC_RATE_PER_10_MIN` | 30 | 不用登录的接口，每个来源地址每 10 分钟最多几次 |

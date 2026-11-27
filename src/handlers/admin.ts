@@ -18,7 +18,9 @@ import { modelFor } from "../services/model";
 import { likePattern } from "../services/work";
 import { addDays, localDay } from "../time";
 import { b64url, fromB64url, iso, newId, parseJson, safeEqual } from "../util";
-import { mailConfigured, mintLoginCode, normalEmail } from "./signin";
+import { mintLoginCode, normalEmail } from "./signin";
+import { mailConfigured } from "../services/mail";
+import { initialMailState } from "../services/invitemail";
 
 type Params = Record<string, string>;
 type AdminHandler = (env: Env, request: Request, params: Params) => Promise<Response>;
@@ -418,13 +420,35 @@ const getOverview: AdminHandler = async (env) => {
 
 const listInvites: AdminHandler = async (env) => {
   const rows = await env.DB.prepare(
-    `SELECT i.email, i.created_at AS invited_at, u.created_at AS joined_at, u.id AS user_id
+    `SELECT i.email, i.created_at AS invited_at, u.created_at AS joined_at, u.id AS user_id,
+       i.lang, i.invite_mail_state, i.invite_mail_at, i.invite_mail_reason
      FROM invites i LEFT JOIN users u ON u.email = i.email ORDER BY i.created_at DESC, i.rowid DESC`,
-  ).all<{ email: string; invited_at: number; joined_at: number | null; user_id: string | null }>();
+  ).all<{
+    email: string;
+    invited_at: number;
+    joined_at: number | null;
+    user_id: string | null;
+    lang: string | null;
+    invite_mail_state: string | null;
+    invite_mail_at: number | null;
+    invite_mail_reason: string | null;
+  }>();
   return json({
-    invites: rows.results.map((r) => ({ email: r.email, invited_at: iso(r.invited_at), joined_at: iso(r.joined_at), user_id: r.user_id })),
+    invites: rows.results.map((r) => ({
+      email: r.email,
+      invited_at: iso(r.invited_at),
+      joined_at: iso(r.joined_at),
+      user_id: r.user_id,
+      lang: r.lang === "zh" || r.lang === "en" ? r.lang : null,
+      // null: an invitation from before the notice mail existed (none was sent, none will be).
+      mail: r.invite_mail_state ? { state: r.invite_mail_state, at: iso(r.invite_mail_at), reason: r.invite_mail_reason } : null,
+    })),
   });
 };
+
+function langOf(value: unknown): "zh" | "en" | null {
+  return value === "zh" || value === "en" ? value : null;
+}
 
 const INVITES_MAX = 1000;
 
@@ -447,11 +471,26 @@ const addInvites: AdminHandler = async (env, request) => {
       if (!invalid.includes(shown)) invalid.push(shown);
     }
   }
+  // The language of each person's notice mail: `langs` per address, `lang` for the rest; none given means the core's default.
+  const everyone = langOf(body.lang);
+  const perAddress = new Map<string, "zh" | "en">();
+  if (body.langs && typeof body.langs === "object" && !Array.isArray(body.langs)) {
+    for (const [address, value] of Object.entries(body.langs)) {
+      const lang = langOf(value);
+      if (lang) perAddress.set(normalEmail(address), lang);
+    }
+  }
   let added: string[] = [];
   if (valid.length > 0) {
-    // One statement however many addresses: only the ones that were not on the list come back.
-    const inserted = await env.DB.prepare("INSERT OR IGNORE INTO invites (email, created_at) SELECT value, ?2 FROM json_each(?1) RETURNING email")
-      .bind(JSON.stringify(valid), now())
+    // One statement however many addresses: only the ones that were not on the list come back, and only they
+    // get an invitation id and a mail state (queued for the Cron to send, or not sent when there is no mail
+    // service): an address that is already invited is not touched, so the core asks for one mail per invitation.
+    const mail = initialMailState(env);
+    const inserted = await env.DB.prepare(
+      `INSERT OR IGNORE INTO invites (email, created_at, invite_id, lang, invite_mail_state, invite_mail_at, invite_mail_reason)
+       SELECT json_extract(value, '$.e'), ?2, 'inv_' || lower(hex(randomblob(12))), json_extract(value, '$.l'), ?3, ?2, ?4 FROM json_each(?1) RETURNING email`,
+    )
+      .bind(JSON.stringify(valid.map((e) => ({ e, l: perAddress.get(e) ?? everyone }))), now(), mail.state, mail.reason)
       .all<{ email: string }>();
     const fresh = new Set(inserted.results.map((r) => r.email));
     added = valid.filter((e) => fresh.has(e));

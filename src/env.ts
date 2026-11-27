@@ -48,9 +48,10 @@ export interface Env {
   /** A token that may create issues in FEEDBACK_GITHUB_REPO, and nothing more. */
   FEEDBACK_GITHUB_TOKEN?: string;
   EMAIL_FROM?: string;
+  /** Optional: the contact address named in the invitation mail. Empty: that sentence is left out. */
+  MAIL_CONTACT?: string;
   /** Optional: the platform's own mail sending (a `send_email` binding). Used before RESEND_API_KEY. */
   EMAIL?: { send(message: { to: string; from: string; subject: string; text: string; html?: string }): Promise<unknown> };
-
   /** Tests only: replaces every outbound request (pages, model, push, mail, client metadata). */
   OUTBOUND?: (input: string, init?: RequestInit) => Promise<Response>;
 }
