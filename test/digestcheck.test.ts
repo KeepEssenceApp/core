@@ -143,3 +143,24 @@ describe("internal-qa #27 (QA's reproduction on c9b9fea): a quantity that is not
     expect(wrongTotal("今天共16条，其中3条讲茶。", 16)).toBeNull();
   });
 });
+
+describe("internal-qa #27, a second look at c9b9fea's neighbours: a part said with a copula, a source, or 'of the 16 items'", () => {
+  it("is not a claim about the whole set", () => {
+    for (const text of [
+      "You saved 16 items today. Of the 16 items, a total of 3 items were about tea.",
+      "You saved 16 items today. A total of 5 items came from one site.",
+      "You saved 16 items today. Four items were about travel and 5 items were from videos.",
+      "今天存入了16条，共有3条是视频。",
+      "Of the 16 items, a total of 3 items were about tea.", // said first: the marker is what makes it a part
+    ]) {
+      expect(`${text} => ${wrongTotal(text, 16)}`).toBe(`${text} => null`);
+    }
+  });
+
+  it("does not hide a wrong total that stands beside them", () => {
+    expect(wrongTotal("You saved 15 items today. A total of 5 items came from one site.", 16)).toBe(15);
+    expect(wrongTotal("今天存入了15条，共有3条是视频。", 16)).toBe(15);
+    expect(wrongTotal("You saved 15 items today. Of the 15 items, a total of 3 items were about tea.", 16)).toBe(15);
+  });
+});
+

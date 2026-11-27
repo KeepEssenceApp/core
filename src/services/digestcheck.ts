@@ -11,7 +11,8 @@
 //   - a subset ("其中共3条", "of these, 3 items were saved from videos", "3 items about tea"): a subset
 //     marker earlier in the sentence, or a topic or a source right after the number, makes it not a total;
 //   - a bare total word ("共 3 条", "a total of 15") counts only where it is about the whole day: in the
-//     summary's first sentence, or with a whole-day word beside it ("今天", "这份摘要", "across the day"). A summary that does not agree is never stored: the built-in assistant asks once more,
+//     summary's first sentence, or with a whole-day word beside it ("今天", "这份摘要", "across the day").
+// A summary that does not agree is never stored: the built-in assistant asks once more,
 // then writes the sentence itself from the snapshot (see fallbackSummary); another assistant is
 // refused with the reason, as the contract says for a result that breaks a field rule.
 
@@ -64,12 +65,13 @@ const ZH_SAVE_VERB = "(?:存入了?|存了|收藏了?|收集了?|保存了?|记�
  */
 type Tier = "whole" | "bare";
 /** What follows a number that is a part and not the whole: a topic ("3 items about tea", "共 3 条讲茶"). */
-const TOPIC_AFTER_EN = /^\s*(?:,\s*)?(?:about|regarding|concerning|related\s+to|tagged|that|which|with)\b/i;
-const TOPIC_AFTER_ZH = /^\s*(?:内容|条目|解读|链接|文章)?\s*(?:讲|谈|说|写|关于|有关|来自|涉及|提到|属于|出自|与|和|跟)/;
+// (The text after a number may begin with the item word: "total of 5 items came from one site".)
+const TOPIC_AFTER_EN = new RegExp(`^\\s*(?:(?:new\\s+)?${EN_THING}\\b)?\\s*(?:,\\s*)?(?:(?:(?:were|was|are|is)\\s+(?:(?:all|mostly|mainly)\\s+)?)?(?:about|regarding|concerning|related\\s+to|tagged|that|which|with|from)|(?:came|come|comes)\\s+from)\\b`, "i");
+const TOPIC_AFTER_ZH = /^\s*(?:内容|条目|解读|链接|文章)?\s*(?:讲|谈|说|写|关于|有关|来自|涉及|提到|属于|出自|与|和|跟|是)/;
 /** What follows "3 items were saved" that makes it a part: where they came from. */
 const SOURCE_AFTER_EN = /^\s*(?:from|via|through|by|about)\b/i;
 /** Said earlier in the same sentence: what comes next is a part of what was just counted. */
-const SUBSET_BEFORE = /\b(?:of\s+(?:these|them|those|which)|among\s+(?:them|these|those|which|the)|including|such\s+as|out\s+of)\b|其中|当中|其余|另外|有的|有些|剩下/i;
+const SUBSET_BEFORE = new RegExp(`\\b(?:of\\s+(?:these|them|those|which)|of\\s+the\\s+(?:${EN_NUM})|among\\s+(?:them|these|those|which|the)|including|such\\s+as|out\\s+of)\\b|其中|当中|其余|另外|有的|有些|剩下`, "i");
 /** The words that say a bare total is about the whole day, not about a topic. */
 const WHOLE_DAY_ZH = /今天|今日|当天|本日|这份|摘要|每日|全部|所有|整天|一天|总体|汇总/;
 
