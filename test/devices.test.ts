@@ -150,3 +150,98 @@ describe("K3 devices", () => {
     expect(list.json.devices[0].last_used_at).not.toBeNull();
   });
 });
+
+// QA #98 (permission copy): the Devices page may say that a manager can change a device's permission after it
+// is connected. That is a different operation from approving a code, and the core's policy is unchanged:
+//   - approving a code: the permission may be lowered, never raised above what the client asked for (B10);
+//   - afterwards: a manager device may set any permission on any other device, except that the last manager
+//     cannot be lowered or revoked;
+//   - a device that is not a manager can do none of this.
+// These are server fixtures with throw-away devices; no real account and no production state.
+describe("QA #98: who may set a device's permission, and when", () => {
+  const RANK = { save: 0, read: 1, manage: 2 } as const;
+  const TIERS = ["save", "read", "manage"] as const;
+
+  it("approving a code: equal or lower than requested is accepted, above it is refused, and a refusal leaves the code to be approved", async () => {
+    const env = makeEnv();
+    const ann = await signIn(env);
+    for (const requested of TIERS) {
+      for (const given of TIERS) {
+        const created = await ask(env, requested);
+        const r = await call(env, "POST", `/v1/device-codes/${created.json.code}/approve`, { token: ann.token, body: { tier: given } });
+        expect(`${requested}→${given} ${r.status}`).toBe(`${requested}→${given} ${RANK[given] <= RANK[requested] ? 200 : 400}`);
+        if (r.status === 200) {
+          expect(r.json.tier).toBe(given);
+        } else {
+          // Refused above the request: nothing was created, and the same code can still be approved, at the requested tier.
+          expect(r.json.error.code).toBe("bad_request");
+          const again = await call(env, "POST", `/v1/device-codes/${created.json.code}/approve`, { token: ann.token, body: {} });
+          expect(again.status).toBe(200);
+          expect(again.json.tier).toBe(requested);
+        }
+      }
+    }
+    // Without a tier in the request, the requested one is given.
+    const plain = await ask(env, "read");
+    expect((await call(env, "POST", `/v1/device-codes/${plain.json.code}/approve`, { token: ann.token, body: {} })).json.tier).toBe("read");
+  });
+
+  it("afterwards a manager device may set any permission on another device, in either direction, and it takes effect at once", async () => {
+    const env = makeEnv();
+    const ann = await signIn(env);
+    const reader = await connectDevice(env, ann, "read"); // it asked for read, and was approved as read
+    expect((await call(env, "GET", "/v1/devices", { token: reader.token })).status).toBe(403);
+    for (const tier of ["manage", "save", "read", "manage"] as const) {
+      const r = await call(env, "PATCH", `/v1/devices/${reader.deviceId}`, { token: ann.token, body: { tier } });
+      expect(`${tier} ${r.status} ${r.json.tier}`).toBe(`${tier} 200 ${tier}`);
+      // What the device may do follows the new tier on its very next request.
+      expect((await call(env, "GET", "/v1/devices", { token: reader.token })).status).toBe(tier === "manage" ? 200 : 403);
+    }
+  });
+
+  it("a device that only saves or only reads cannot change, revoke, list or approve anything, and nothing changes", async () => {
+    const env = makeEnv();
+    const ann = await signIn(env);
+    const target = await connectDevice(env, ann, "read");
+    for (const tier of ["save", "read"] as const) {
+      const weak = await connectDevice(env, ann, tier);
+      const waiting = await ask(env, "read");
+      const attempts = [
+        await call(env, "PATCH", `/v1/devices/${target.deviceId}`, { token: weak.token, body: { tier: "manage" } }),
+        await call(env, "PATCH", `/v1/devices/${weak.deviceId}`, { token: weak.token, body: { tier: "manage" } }),
+        await call(env, "DELETE", `/v1/devices/${target.deviceId}`, { token: weak.token }),
+        await call(env, "GET", "/v1/devices", { token: weak.token }),
+        await call(env, "GET", `/v1/device-codes/${waiting.json.code}/request`, { token: weak.token }),
+        await call(env, "POST", `/v1/device-codes/${waiting.json.code}/approve`, { token: weak.token, body: {} }),
+        await call(env, "POST", `/v1/device-codes/${waiting.json.code}/deny`, { token: weak.token }),
+      ];
+      for (const [i, r] of attempts.entries()) {
+        expect(`${tier} #${i} ${r.status} ${r.json?.error?.code}`).toBe(`${tier} #${i} 403 forbidden`);
+      }
+      // Still pending, still the same tier, still alive.
+      expect((await call(env, "GET", `/v1/device-codes/${waiting.json.code}/request`, { token: ann.token })).json.requested_tier).toBe("read");
+      const list = (await call(env, "GET", "/v1/devices", { token: ann.token })).json.devices;
+      expect(list.find((d: any) => d.id === target.deviceId).tier).toBe("read");
+      expect(list.find((d: any) => d.id === weak.deviceId).tier).toBe(tier);
+    }
+  });
+
+  it("the last manager cannot be lowered or revoked, even by itself; with two, one may be lowered and then the other is the last", async () => {
+    const env = makeEnv();
+    const ann = await signIn(env);
+    const second = await connectDevice(env, ann, "manage");
+    // Two managers: lowering the second is fine.
+    expect((await call(env, "PATCH", `/v1/devices/${second.deviceId}`, { token: ann.token, body: { tier: "read" } })).status).toBe(200);
+    // Now `ann` is the last one: neither it nor anyone else may lower or revoke it.
+    for (const token of [ann.token, second.token]) {
+      const lower = await call(env, "PATCH", `/v1/devices/${ann.deviceId}`, { token, body: { tier: "read" } });
+      // The lowered second device is not a manager any more: the refusal is its tier; ann's is the last-manager rule.
+      expect(`${token === ann.token ? "ann" : "second"} ${lower.status} ${lower.json.error.code}`).toBe(token === ann.token ? "ann 409 last_manager" : "second 403 forbidden");
+    }
+    const revoke = await call(env, "DELETE", `/v1/devices/${ann.deviceId}`, { token: ann.token });
+    expect(`${revoke.status} ${revoke.json.error.code}`).toBe("409 last_manager");
+    // Raising the second one back makes it possible again to lower the first.
+    expect((await call(env, "PATCH", `/v1/devices/${second.deviceId}`, { token: ann.token, body: { tier: "manage" } })).status).toBe(200);
+    expect((await call(env, "PATCH", `/v1/devices/${ann.deviceId}`, { token: second.token, body: { tier: "read" } })).status).toBe(200);
+  });
+});
