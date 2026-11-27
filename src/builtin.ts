@@ -5,9 +5,10 @@ import { now } from "./clock";
 import { LIMITS, num, type Env } from "./env";
 import type { Lang } from "./errors";
 import { builtinActor, getUser } from "./services/accounts";
-import { callModel, extractJson, modelConfigured, type ContentBlock, type ModelBudget } from "./services/model";
+import { askModel, callModel, extractJson, modelConfigured, type ContentBlock, type ModelBudget } from "./services/model";
 import { digestDue } from "./services/digests";
-import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, getContext, getDigestContext, getRules, noteAnalysisFailure, recordUnsubmittedUsage, releaseClaim, submitResults, type UsageInput } from "./services/work";
+import { fallbackSummary, wrongTotal } from "./services/digestcheck";
+import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, digestCallsSpent, getContext, getDigestContext, getRules, noteAnalysisFailure, recordUnsubmittedUsage, recordUnusedUsage, releaseClaim, submitResults, type UsageInput } from "./services/work";
 import type { AssistantActor, UserRow } from "./types";
 import { shorten, truncate } from "./util";
 
@@ -414,9 +415,16 @@ export async function analyseForUser(env: Env, userId: string, origin: string): 
 
 const DIGEST_SYSTEM = (target: Target) =>
   `You write the owner's daily digest from the analyses of what they saved. Write in ${target.name}${target.from === "account" ? ", whatever language the analyses are in: translate what you report" : " (most of the analyses are in it): do not translate it into another language"}. Plain text, no images, no tags, no long quotes. Answer with JSON only:\n` +
-  `{"summary": a few sentences on what was saved, at most 600 characters;\n` +
+  `{"summary": a few sentences on what was saved, at most 600 characters. The input's "total" is how many items this digest covers: if the summary says how many items were saved or covered, it says exactly that number; when unsure, it says no number;\n` +
   ` "worth": [{"item_id": string, "line": one sentence with the conclusion, at most 160 characters}] — only items whose verdict is worth_deep_dive and that the owner has not marked (signal is null) and has not queued;\n` +
   ` "question": one question to sleep on, at most 160 characters}`;
+
+/**
+ * How many answers the model is paid for one digest, in all: the first, and one more when its summary does not agree with
+ * the snapshot (core#3). The count is kept across Cron runs (a run that finds the answer unusable gives the claim back, and
+ * the next run must not begin again), from what the calls were recorded as costing.
+ */
+const DIGEST_ASKS = 2;
 
 /** Writes the daily digest for one user if it is due (after 21:00 in their time zone) and theirs to write. */
 export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
@@ -427,32 +435,102 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
   const claim = await claimWork(env, actor, "digest", 1);
   if (!claim.claim_id) return false;
   await seen(env, actor);
+  let paid = false; // the cost of the model's answers is on record: with the hand-in, or on its own
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let calls = 0;
+  let model: string | undefined;
+  /** What the answers cost, when no hand-in carries it. */
+  const recordSpent = async () => {
+    if (paid || calls === 0) return;
+    paid = true;
+    await recordUnusedUsage(env, actor, claim.claim_id!, { model, input_tokens: inputTokens, output_tokens: outputTokens, calls }).catch((e) => console.error("digest usage not recorded", e));
+  };
   try {
     const day = claim.work[0].ref;
-    const ctx = await getDigestContext(env, actor, day);
-    const target = digestTarget(user.lang, user.always_my_language === 1, ctx.analyses.filter((a) => !a.unavailable).map((a) => a.summary));
-    const reply = await callModel(env, { timeoutMs: 25_000, maxTokens: 4000, system: DIGEST_SYSTEM(target), content: JSON.stringify(ctx) });
-    const x = reply ? (extractJson(reply.text) as any) : null;
-    const summary = str(x?.summary, 600);
-    const question = str(x?.question, 160);
-    if (!reply || !summary || !question) {
+    // The budget of this digest, whatever earlier runs spent: when it is gone the model is not asked again today.
+    const asksLeft = DIGEST_ASKS - (await digestCallsSpent(env, user.id, day));
+    if (asksLeft <= 0) {
+      console.warn(`digest of ${day} not written: the model has already answered ${DIGEST_ASKS} times for it`);
       await releaseClaim(env, actor, claim.claim_id);
       return false;
+    }
+    let ctx = await getDigestContext(env, actor, day);
+    // What the digest is written in: the language most of the day's analyses are in (the account's when the switch is on, or no majority).
+    const targetOf = (c: typeof ctx) => digestTarget(user.lang, user.always_my_language === 1, c.analyses.filter((a) => !a.unavailable).map((a) => a.summary));
+    let correction: string | undefined;
+    let first: { summary: string; question: string; worth: unknown } | null = null;
+    let summary: string | undefined;
+    let question: string | undefined;
+    let worthRaw: unknown;
+    for (let ask = 1; ask <= asksLeft; ask++) {
+      const answer = await askModel(env, {
+        timeoutMs: 25_000,
+        maxTokens: 4000,
+        system: DIGEST_SYSTEM(targetOf(ctx)),
+        content: JSON.stringify({ ...ctx, total: ctx.analyses.length, ...(correction ? { correction } : {}) }),
+      });
+      // An answer that was paid for is on record and spends one of the digest's two, whether or not its text can be used
+      // (an empty answer or a refusal that carries its usage was paid for too). A call that got no answer costs nothing and
+      // is not made up a cost.
+      if (answer.cost) {
+        calls++;
+        model = answer.cost.model;
+        inputTokens += answer.cost.inputTokens;
+        outputTokens += answer.cost.outputTokens;
+      }
+      const reply = answer.reply;
+      const x = reply ? (extractJson(reply.text) as any) : null;
+      const said = str(x?.summary, 600);
+      const asked = str(x?.question, 160);
+      if (!reply || !said || !asked) {
+        // The first answer unusable: nothing to go on, the next round tries again (within what is left of the budget). A later one: the first answer's question and worth stand.
+        if (!first) {
+          await recordSpent();
+          await releaseClaim(env, actor, claim.claim_id);
+          return false;
+        }
+        break;
+      }
+      summary = said;
+      question = asked;
+      worthRaw = x.worth;
+      first ??= { summary: said, question: asked, worth: x.worth };
+      // The set can have grown while the model wrote (an analysis landing before midnight): what is checked against is what is there now.
+      const fresh = await getDigestContext(env, actor, day);
+      const stated = wrongTotal(said, fresh.analyses.length);
+      ctx = fresh;
+      if (stated === null) break;
+      correction = `Your summary said ${stated} items, but this digest covers ${fresh.analyses.length}. Write the summary again: say ${fresh.analyses.length}, or give no number.`;
+      summary = undefined;
+    }
+    if (!first) {
+      await recordSpent();
+      await releaseClaim(env, actor, claim.claim_id);
+      return false;
+    }
+    // Still not in agreement after the second ask (or the second ask failed): the summary is the snapshot's own sentence, never the model's number.
+    if (summary === undefined) {
+      summary = fallbackSummary(ctx.analyses.length, user.lang);
+      question = first.question;
+      worthRaw = first.worth;
     }
     const known = new Set(ctx.analyses.map((a) => a.item_id));
     const used = new Set<string>();
     const worth: { item_id: string; line: string }[] = [];
-    for (const w of Array.isArray(x.worth) ? x.worth : []) {
+    for (const w of Array.isArray(worthRaw) ? worthRaw : []) {
       const line = str(w?.line, 160);
       if (!line || typeof w.item_id !== "string" || !known.has(w.item_id) || used.has(w.item_id)) continue;
       used.add(w.item_id);
       worth.push({ item_id: w.item_id, line });
     }
-    const usage: UsageInput = { model: reply.model, input_tokens: reply.inputTokens, output_tokens: reply.outputTokens, calls: 1 };
+    const usage: UsageInput = { model, input_tokens: inputTokens, output_tokens: outputTokens, calls };
     const { outcomes } = await submitResults(env, actor, claim.claim_id, [{ kind: "digest", day, summary, worth: worth.slice(0, 50), question }], usage, user.lang);
+    paid = true; // the hand-in recorded it
     return outcomes[0]?.accepted === true;
   } catch (e) {
     console.error("digest failed", e);
+    await recordSpent();
     await releaseClaim(env, actor, claim.claim_id).catch(() => {});
     return false;
   }

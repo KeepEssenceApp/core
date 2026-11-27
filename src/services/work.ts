@@ -10,6 +10,7 @@ import { iso, newId, parseJson, truncate } from "../util";
 import { getUser, listAssistants } from "./accounts";
 import { signedDownloadUrl } from "./assets";
 import { coveredItems, coversOf, digestDay, digestDue, type DigestRow } from "./digests";
+import { mismatchReason, wrongTotal } from "./digestcheck";
 import { countStatement, displayTitle, fileOfItem, liveItem, maxExpiryDays, namesOf, OPENING_CHARS, sharedText, signature, WAITING_STATES } from "./items";
 import { notifyEventStatement } from "./notify";
 
@@ -231,6 +232,37 @@ export async function releaseClaim(env: Env, actor: AssistantActor, claimId: str
     ),
     env.DB.prepare("UPDATE claims SET status = 'released' WHERE id = ? AND user_id = ? AND status = 'active'").bind(claim.id, actor.userId),
   ]);
+}
+
+/**
+ * What a model call cost although its answer could not be handed in (a reply that is not JSON, or lacks a field): it is
+ * recorded against the claim like any hand-in, with no items accepted. Without this the tokens were paid and never counted,
+ * and nothing remembered that the digest had been asked about (core#3).
+ */
+export async function recordUnusedUsage(env: Env, actor: AssistantActor, claimId: string, usage: UsageInput): Promise<void> {
+  if (!usage.calls) return;
+  const claim = await ownClaim(env, actor, claimId);
+  await env.DB.prepare(
+    `INSERT INTO usage_records (id, user_id, assistant_id, claim_id, kind, model, input_tokens, output_tokens, calls, items, self_reported, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+  )
+    .bind(newId("use"), actor.userId, actor.assistantId, claim.id, claim.kind, usage.model ?? null, usage.input_tokens ?? 0, usage.output_tokens ?? 0, usage.calls, now())
+    .run();
+}
+
+/**
+ * How many answers the core's own model calls have returned for the digest of this day, over every claim and every Cron
+ * run (the usage records of the claims that were for this day; nothing else is counted). The budget of a digest is spent
+ * here, so that a run that gives up and a claim that is released cannot start the count again.
+ */
+export async function digestCallsSpent(env: Env, userId: string, day: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(SUM(u.calls), 0) AS n FROM usage_records u JOIN claims c ON c.id = u.claim_id
+     WHERE u.user_id = ?1 AND u.kind = 'digest' AND u.self_reported = 0 AND c.user_id = ?1 AND c.kind = 'digest' AND c.refs = ?2`,
+  )
+    .bind(userId, JSON.stringify([day]))
+    .first<{ n: number }>();
+  return row?.n ?? 0;
 }
 
 /** A built-in assistant tries an item at most this often; then it says the content could not be read (QA #20). */
@@ -495,6 +527,12 @@ export async function submitResults(env: Env, actor: AssistantActor, claimId: st
         lines.add(w.item_id);
       }
       if (!r.summary.trim() || !r.question.trim()) throw invalid(r.day, "总结和睡前一问不能为空", "summary and question must not be empty");
+      // A summary that states how many items were covered says the snapshot's number, or none (core#3).
+      const stated = wrongTotal(r.summary, covered.length);
+      if (stated !== null) {
+        const why = mismatchReason(stated, covered.length);
+        throw invalid(r.day, why.zh, why.en);
+      }
       const entries = covered.map((c) => ({ item_id: c.id, title: displayTitle(c, user.lang), verdict: c.verdict }));
       statements.push(
         env.DB.prepare(

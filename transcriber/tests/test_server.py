@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import os
 import threading
 import time
@@ -9,6 +10,27 @@ import time
 from ke_transcriber.audio import BadAudio, ProbeUnavailable
 
 from .helpers import SECRET, FakeEngine, ServerCase, make_wav, seg
+
+
+def recv_more(sock: socket.socket) -> bytes:
+    """More of an answer, or an explicit failure. A closed peer is not "nothing yet": recv() returns b"" at once, for ever,
+    so a loop that waits for more would spin on it (the socket's timeout never fires) instead of saying what went wrong."""
+    chunk = sock.recv(65536)
+    if not chunk:
+        raise AssertionError("the connection was closed before the whole answer had arrived")
+    return chunk
+
+
+def read_answer(sock: socket.socket) -> tuple[bytes, bytes]:
+    """The head and the body of one answer that says how long its body is."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        data += recv_more(sock)
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = int([l.split(b":")[1] for l in head.split(b"\r\n") if l.lower().startswith(b"content-length")][0])
+    while len(body) < length:
+        body += recv_more(sock)
+    return head, body
 
 
 class AuthTests(ServerCase):
@@ -221,6 +243,62 @@ class BadInputTests(ServerCase):
         res = conn.getresponse()
         self.assertEqual((res.status, json.loads(res.read())), (411, {"error": "length_required"}))
         conn.close()
+
+    def test_the_411_does_not_cut_off_a_chunked_body_that_is_still_on_its_way(self) -> None:
+        # The server answers 411 as soon as it has the headers, and cannot know how long a chunked body is. If it closed
+        # then, the body still on its way would meet a closed socket: a reset, a BrokenPipeError in the client, and an
+        # answer that can be lost with it. That was a race that CI sometimes lost. Here the body is sent only after the
+        # answer has been read, so the old behaviour fails every time instead of now and then.
+        h = self.start()
+        wav = make_wav()
+        sock = socket.create_connection(("127.0.0.1", h.port), timeout=10)
+        try:
+            sock.sendall(("POST /transcribe HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + SECRET + "\r\nContent-Type: audio/wav\r\n"
+                          "Transfer-Encoding: chunked\r\n\r\n").encode("ascii"))
+            head, body = read_answer(sock)
+            self.assertTrue(head.startswith(b"HTTP/1.1 411 "), head[:60])
+            self.assertEqual(json.loads(body), {"error": "length_required"})
+            # The rest of the body, now: it must be taken, not refused.
+            sock.sendall(("%x\r\n" % len(wav)).encode("ascii") + wav + b"\r\n")
+            time.sleep(0.2)
+            sock.sendall(b"0\r\n\r\n")
+        finally:
+            sock.close()
+        self.assertEqual(self.engine.calls, [])
+        self.assertEqual(h.files_left(), [])
+
+    def test_an_answer_that_ends_early_fails_the_test_and_does_not_wait_for_more(self) -> None:
+        # The loops that read the 411 above wait for the rest of the answer. If the server closed after part of it, recv()
+        # would return b"" at once for ever and they would spin without end; they fail, saying so, instead.
+        cases = {
+            "in the head": b"HTTP/1.1 411 Length Required\r\nContent-Le",
+            "in the body": b"HTTP/1.1 411 Length Required\r\nContent-Length: 30\r\n\r\n{\"error\": ",
+            "before anything": b"",
+        }
+        for where, partial in cases.items():
+            with self.subTest(where=where):
+                ours, theirs = socket.socketpair()
+                try:
+                    if partial:
+                        theirs.sendall(partial)
+                    theirs.close()
+                    started = time.monotonic()
+                    with self.assertRaises(AssertionError) as raised:
+                        read_answer(ours)
+                    self.assertIn("closed before the whole answer", str(raised.exception))
+                    self.assertLess(time.monotonic() - started, 2)
+                finally:
+                    ours.close()
+        # A whole answer is read as before, whether it comes in one piece or in two.
+        ours, theirs = socket.socketpair()
+        try:
+            full = b"HTTP/1.1 411 Length Required\r\nContent-Length: 28\r\n\r\n{\"error\": \"length_required\"}"
+            theirs.sendall(full[:30])
+            theirs.sendall(full[30:])
+            self.assertEqual(read_answer(ours)[1], b"{\"error\": \"length_required\"}")
+        finally:
+            ours.close()
+            theirs.close()
 
     def test_a_body_that_stops_short_is_400_and_leaves_no_file(self) -> None:
         h = self.start()
