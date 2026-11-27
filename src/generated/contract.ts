@@ -2119,7 +2119,7 @@ export const CONTRACT: Contract = {
                     "summary": {
                       "type": "string",
                       "maxLength": 600,
-                      "description": "A few sentences on what was saved. Plain text."
+                      "description": "A few sentences on what was saved. Plain text. If it states how many items were saved or\ncovered, the number must be the number of entries in `analyses` of the digest context (the\nnumber the digest then shows as its count); a summary that states another number is refused\nwith `invalid_result`. When unsure, state no number.\n"
                     },
                     "worth": {
                       "type": "array",
@@ -2952,7 +2952,7 @@ export const CONTRACT: Contract = {
                     "summary": {
                       "type": "string",
                       "maxLength": 600,
-                      "description": "A few sentences on what was saved. Plain text."
+                      "description": "A few sentences on what was saved. Plain text. If it states how many items were saved or\ncovered, the number must be the number of entries in `analyses` of the digest context (the\nnumber the digest then shows as its count); a summary that states another number is refused\nwith `invalid_result`. When unsure, state no number.\n"
                     },
                     "worth": {
                       "type": "array",
