@@ -234,9 +234,49 @@ describe("QA #85–#87: the ways a link's content is read", () => {
     const ann = await signIn(env);
     const r = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", url: "https://www.xiaohongshu.com/explore/1" }, idem: idem() });
     const item = (await call(env, "GET", `/v1/items/${r.json.item_id}`, { token: ann.token })).json;
-    expect(item).toMatchObject({ title: "一个家最好的状态 - rednote", content_unavailable: true });
+    // The title is the note's own; the site's name at the end of the page's title ("- rednote") is not part of it.
+    expect(item).toMatchObject({ title: "一个家最好的状态", content_unavailable: true });
     expect((await db(env, "SELECT body FROM items WHERE id = ?", r.json.item_id))[0].body ?? "").toBe("");
     expect(await db(env, "SELECT platform, path, n FROM fetch_stats")).toEqual([{ platform: "xiaohongshu", path: "none", n: 1 }]);
+  });
+
+  describe("the site's name at the end of a Xiaohongshu title", () => {
+    const BODY = "<p>" + "阳台上的薄荷长得很快，每周都要剪一次，剪下来的叶子可以泡水喝。".repeat(4) + "</p>";
+    const save = async (env: any, ann: any, body: Record<string, unknown>) => {
+      const r = await call(env, "POST", "/v1/items", { token: ann.token, body: { kind: "link", ...body }, idem: idem() });
+      expect(r.status).toBe(201);
+      return (await call(env, "GET", `/v1/items/${r.json.item_id}`, { token: ann.token })).json;
+    };
+
+    it("a page that was read gives its title without it, on every Xiaohongshu host and short link", async () => {
+      const urls = ["https://www.xiaohongshu.com/explore/a1", "https://www.rednote.com/explore/a2", "https://xhslink.com/a/a3", "https://xhslink.cn/a4"];
+      const env = makeEnv({ OUTBOUND: pages(Object.fromEntries(urls.map((u) => [u, () => html("阳台上的薄荷 - rednote", BODY)]))) });
+      const ann = await signIn(env);
+      for (const url of urls) expect(await save(env, ann, { url })).toMatchObject({ title: "阳台上的薄荷", content_unavailable: false });
+    });
+
+    it("a title the browser sent is cleaned too, and is still the client's own (the page does not replace it)", async () => {
+      const env = makeEnv({ OUTBOUND: pages({ "https://www.xiaohongshu.com/explore/b1": () => html("Something else entirely - rednote", BODY) }) });
+      const ann = await signIn(env);
+      const item = await save(env, ann, { url: "https://www.xiaohongshu.com/explore/b1", title: "阳台上的薄荷 - rednote" });
+      expect(item.title).toBe("阳台上的薄荷");
+      expect((await db(env, "SELECT title_from FROM items WHERE id = ?", item.id))[0].title_from).toBe("client");
+    });
+
+    it("only a dash, a space before it and the end of the title: other sites, and other endings, are left as they are", async () => {
+      const env = makeEnv({
+        OUTBOUND: pages({
+          "https://blog.example.org/rednote": () => html("Why I left - rednote", BODY),
+          "https://www.xiaohongshu.com/explore/c1": () => html("rednote 的使用心得 - 小红书", BODY),
+          "https://www.xiaohongshu.com/explore/c2": () => html("薄荷-rednote", BODY),
+        }),
+      });
+      const ann = await signIn(env);
+      expect((await save(env, ann, { url: "https://blog.example.org/rednote" })).title).toBe("Why I left - rednote");
+      expect((await save(env, ann, { url: "https://www.xiaohongshu.com/explore/c1" })).title).toBe("rednote 的使用心得 - 小红书");
+      expect((await save(env, ann, { url: "https://www.xiaohongshu.com/explore/c2" })).title).toBe("薄荷-rednote");
+      expect((await save(env, ann, { url: "https://blog.example.org/other", title: "My note - rednote" })).title).toBe("My note - rednote");
+    });
   });
 
   it("a reader service is not asked until the operator turns it on; then it is asked after the direct way fails", async () => {

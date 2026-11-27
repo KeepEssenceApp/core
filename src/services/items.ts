@@ -8,7 +8,7 @@ import type { AssistantRow, ItemRow, UserRow } from "../types";
 import { firstSentence, iso, looksLikeUrl, parseJson, shorten, truncate } from "../util";
 import { assetText, isTextType, type AssetRow } from "./assets";
 import { cancelJob, fetchContent } from "./fetchers";
-import { titleWins, usableTitle } from "./pagerules";
+import { titleWins, usableTitle, withoutSiteTag } from "./pagerules";
 import { siteOf } from "./fetchpage";
 
 export const OPENING_CHARS = 500;
@@ -177,7 +177,7 @@ export async function liveItem(env: Env, userId: string, itemId: string): Promis
  * A title the client sent never comes here: it stays, whatever the page says.
  */
 function pageTitle(page: { title: string; site: string }, item: { url: string | null; title: string }): string {
-  const title = cleanTitle(page.title);
+  const title = withoutSiteTag(cleanTitle(page.title), item.url);
   if (!title || !usableTitle(title, { url: item.url ?? "", site: page.site })) return "";
   return titleWins(item.title, title) ? title : item.title;
 }

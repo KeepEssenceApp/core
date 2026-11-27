@@ -1,6 +1,6 @@
 // QA #100: the rules the direct read judges a page by. Fabricated text only.
 import { describe, expect, it } from "vitest";
-import { assessPage, CAPTION_CHARS, endedOnFrontPage, LOGIN_HINTS, loginAddress, onDomain, THIN_CHARS, titleWins, usableTitle, userAgentsFor, UA_DESKTOP, UA_IPHONE, WALL_HINTS, wallHint, XIAOHONGSHU } from "../src/services/pagerules";
+import { assessPage, CAPTION_CHARS, endedOnFrontPage, LOGIN_HINTS, loginAddress, onDomain, THIN_CHARS, titleWins, usableTitle, userAgentsFor, UA_DESKTOP, UA_IPHONE, WALL_HINTS, wallHint, withoutSiteTag, XIAOHONGSHU } from "../src/services/pagerules";
 
 const lines = (...l: string[]) => l.join("\n");
 const ARTICLE = "Steep green tea for two minutes in water of about eighty degrees, and taste it before the second cup, because the leaves give more each time they are steeped.";
@@ -112,6 +112,37 @@ describe("QA #100: content, or only the shell around it", () => {
 
   it("a Channels share page whose shell holds only scripts is a shell", () => {
     expect(assessPage({ url: "https://weixin.qq.com/sph/AbCdEf", text: "" })).toMatchObject({ quality: "thin" });
+  });
+});
+
+describe("Xiaohongshu: the site's name at the end of a title", () => {
+  const xhs = "https://www.xiaohongshu.com/explore/1";
+
+  it("is taken off, on every address of the site, in either case and with a dash, an en dash, an em dash or a pipe", () => {
+    for (const url of [xhs, "https://www.rednote.com/explore/1", "https://xhslink.com/a/x", "https://xhslink.cn/x", "https://sub.xiaohongshu.com/x"]) {
+      expect(withoutSiteTag("一个家最好的状态 - rednote", url)).toBe("一个家最好的状态");
+    }
+    for (const title of ["阳台上的薄荷 – rednote", "阳台上的薄荷 — Rednote", "阳台上的薄荷 | REDNOTE", "阳台上的薄荷  -  rednote  ", "Mint on the balcony - rednote"]) {
+      expect(withoutSiteTag(title, xhs)).toBe(title.replace(/\s+[-–—|]\s*rednote\s*$/i, "").trim());
+    }
+  });
+
+  it("is taken off once, and only at the very end", () => {
+    expect(withoutSiteTag("a - rednote - rednote", xhs)).toBe("a - rednote");
+    expect(withoutSiteTag("登录 - rednote - share, connect, love", xhs)).toBe("登录 - rednote - share, connect, love");
+    expect(withoutSiteTag("rednote 的使用心得 - 小红书", xhs)).toBe("rednote 的使用心得 - 小红书");
+    expect(withoutSiteTag("薄荷-rednote", xhs)).toBe("薄荷-rednote");
+    expect(withoutSiteTag("how to use rednote", xhs)).toBe("how to use rednote");
+  });
+
+  it("leaves a title alone when nothing would be left, and every other site's title", () => {
+    expect(withoutSiteTag("rednote", xhs)).toBe("rednote");
+    expect(withoutSiteTag("- rednote", xhs)).toBe("- rednote");
+    expect(withoutSiteTag("Why I left - rednote", "https://blog.example.org/post")).toBe("Why I left - rednote");
+    expect(withoutSiteTag("Why I left - rednote", "https://notxiaohongshu.com/x")).toBe("Why I left - rednote");
+    expect(withoutSiteTag("Why I left - rednote", "https://example.org/xiaohongshu.com/x")).toBe("Why I left - rednote");
+    expect(withoutSiteTag("Why I left - rednote", null)).toBe("Why I left - rednote");
+    expect(withoutSiteTag("Why I left - rednote", "not an address")).toBe("Why I left - rednote");
   });
 });
 
