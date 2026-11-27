@@ -10,6 +10,7 @@ import { iso, newId, parseJson, truncate } from "../util";
 import { getUser, listAssistants } from "./accounts";
 import { signedDownloadUrl } from "./assets";
 import { coveredItems, coversOf, digestDay, digestDue, type DigestRow } from "./digests";
+import { mismatchReason, wrongTotal } from "./digestcheck";
 import { countStatement, displayTitle, fileOfItem, liveItem, maxExpiryDays, namesOf, OPENING_CHARS, sharedText, signature, WAITING_STATES } from "./items";
 import { notifyEventStatement } from "./notify";
 
@@ -482,6 +483,12 @@ export async function submitResults(env: Env, actor: AssistantActor, claimId: st
         lines.add(w.item_id);
       }
       if (!r.summary.trim() || !r.question.trim()) throw invalid(r.day, "总结和睡前一问不能为空", "summary and question must not be empty");
+      // A summary that states how many items were covered says the snapshot's number, or none (core#3).
+      const stated = wrongTotal(r.summary, covered.length);
+      if (stated !== null) {
+        const why = mismatchReason(stated, covered.length);
+        throw invalid(r.day, why.zh, why.en);
+      }
       const entries = covered.map((c) => ({ item_id: c.id, title: displayTitle(c, user.lang), verdict: c.verdict }));
       statements.push(
         env.DB.prepare(
