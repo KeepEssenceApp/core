@@ -31,7 +31,8 @@ bucket_name = "keepessence-assets"
 APP_ORIGIN = "https://app.test"
 # Model endpoint in the Anthropic Messages API format; the key is the secret LLM_API_KEY.
 LLM_BASE_URL = "https://model.test"
-LLM_MODEL = "claude-haiku-5-5"
+LLM_MODEL_TRIAGE = "claude-haiku-5-5"
+LLM_MODEL_WORKER = "claude-sonnet-5-5"
 # Set to "1" only for local development over plain http.
 ALLOW_HTTP = "0"
 # Tunable limits (strings; empty or missing means the default written here).

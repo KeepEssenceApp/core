@@ -6,7 +6,7 @@ import { askModel, callModel } from "../src/services/model";
 import { LLM, makeEnv, type Outbound } from "./helpers";
 
 const USAGE = { input_tokens: 120, output_tokens: 40 };
-const REQ = { system: "s", content: "c", maxTokens: 100, timeoutMs: 1000 };
+const REQ = { role: "triage" as const, system: "s", content: "c", maxTokens: 100, timeoutMs: 1000 };
 const answering = (body: unknown, status = 200): Outbound => async () => Response.json(body, { status });
 const text = (t: string, extra: Record<string, unknown> = {}) => ({ model: "m-test", stop_reason: "end_turn", content: [{ type: "text", text: t }], ...extra });
 

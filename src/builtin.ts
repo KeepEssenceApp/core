@@ -38,6 +38,7 @@ export async function dispatchForUser(env: Env, userId: string): Promise<number>
     const candidates = rules.assistants.filter((a) => a.steps.includes("analysis")).map((a) => a.name);
     const hasRules = rules.rules.trim().length > 0;
     const reply = await callModel(env, {
+      role: "triage",
       timeoutMs: 10_000,
       maxTokens: 1500,
       system:
@@ -292,7 +293,7 @@ async function analyseOne(env: Env, actor: AssistantActor, itemId: string, rules
   };
   let noEffort = false;
   const ask = async (correction?: string) => {
-    const r = await callModel(env, { timeoutMs: 25_000, budget, noEffort, maxTokens: 2000, system: ANALYSIS_SYSTEM(target), content: contentFor(correction), onFailure: (reason) => (why = reason), onUnusedReply: paid });
+    const r = await callModel(env, { role: "worker", timeoutMs: 25_000, budget, noEffort, maxTokens: 2000, system: ANALYSIS_SYSTEM(target), content: contentFor(correction), onFailure: (reason) => (why = reason), onUnusedReply: paid });
     if (r) {
       paid(r);
       if (r.effortRefused) noEffort = true;
@@ -465,6 +466,7 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
     let worthRaw: unknown;
     for (let ask = 1; ask <= asksLeft; ask++) {
       const answer = await askModel(env, {
+        role: "worker",
         timeoutMs: 25_000,
         maxTokens: 4000,
         system: DIGEST_SYSTEM(targetOf(ctx)),

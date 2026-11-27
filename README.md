@@ -140,6 +140,7 @@ npm run typecheck   # 类型检查
    - 用自己的域名：去掉 `routes` 那一行的注释，填上域名（域名要已经在这个 Cloudflare 账号里）。
    - 网页应用是另一个 Worker 时：去掉 `[[services]]` 那一段的注释，填它的名字。不是接口的请求会转给它；不配就回 404。
    - 模型不是直连官方接口时，把 `LLM_BASE_URL` 改成你的网关地址（要兼容 Anthropic Messages API）。
+   - 内置助手的模型和思考强度按工作分开配（`[vars]`）：初筛用 `LLM_MODEL_TRIAGE` / `LLM_EFFORT_TRIAGE`（缺省 `claude-haiku-5-5` / `low`），解读和每日摘要用 `LLM_MODEL_WORKER` / `LLM_EFFORT_WORKER`（缺省 `claude-sonnet-5-5` / `medium`）。网关上没有这些模型就改成它有的；只想用一个模型，就只写旧的 `LLM_MODEL`，没有单独配的工作都用它。强度只认 `low`、`medium`、`high`，别的值当没配。网关不认强度这个字段（回 400）时，核心去掉它重发一次，不会再多发。换模型名之前，先用编造的内容对网关试一次，见 `docs/pitfalls.md`。
 4. 设密钥。密钥只放在 Cloudflare 上，不写进任何文件：
 
    ```sh
