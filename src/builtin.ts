@@ -5,7 +5,7 @@ import { now } from "./clock";
 import { LIMITS, num, type Env } from "./env";
 import type { Lang } from "./errors";
 import { builtinActor, getUser } from "./services/accounts";
-import { callModel, extractJson, modelConfigured, type ContentBlock } from "./services/model";
+import { askModel, callModel, extractJson, modelConfigured, type ContentBlock } from "./services/model";
 import { digestDue } from "./services/digests";
 import { fallbackSummary, wrongTotal } from "./services/digestcheck";
 import { ANALYSIS_MAX_ATTEMPTS, capLeft, claimWork, digestCallsSpent, getContext, getDigestContext, getRules, noteAnalysisFailure, recordUnusedUsage, releaseClaim, submitResults, type UsageInput } from "./services/work";
@@ -303,18 +303,22 @@ export async function digestForUser(env: Env, user: UserRow): Promise<boolean> {
     let question: string | undefined;
     let worthRaw: unknown;
     for (let ask = 1; ask <= asksLeft; ask++) {
-      const reply = await callModel(env, {
+      const answer = await askModel(env, {
         timeoutMs: 25_000,
         maxTokens: 4000,
         system: DIGEST_SYSTEM(user.lang),
         content: JSON.stringify({ ...ctx, total: ctx.analyses.length, ...(correction ? { correction } : {}) }),
       });
-      if (reply) {
+      // An answer that was paid for is on record and spends one of the digest's two, whether or not its text can be used
+      // (an empty answer or a refusal that carries its usage was paid for too). A call that got no answer costs nothing and
+      // is not made up a cost.
+      if (answer.cost) {
         calls++;
-        model = reply.model;
-        inputTokens += reply.inputTokens;
-        outputTokens += reply.outputTokens;
+        model = answer.cost.model;
+        inputTokens += answer.cost.inputTokens;
+        outputTokens += answer.cost.outputTokens;
       }
+      const reply = answer.reply;
       const x = reply ? (extractJson(reply.text) as any) : null;
       const said = str(x?.summary, 600);
       const asked = str(x?.question, 160);
